@@ -1,0 +1,90 @@
+# Agent sandbox with a HOST-ENFORCED egress boundary.
+#
+# The workload has no direct route to the internet (it is on the `internal`
+# network only) and no NET_ADMIN. All outbound goes through the `gateway`
+# sidecar — an allowlist forward proxy the agent has no root on and cannot
+# reconfigure. Root-in-the-workload cannot reach past the allowlist because the
+# boundary is the docker topology, not in-container iptables. See README
+# "Security model — the box is host-enforced".
+
+# Single source of truth for the egress allowlist additions (both the gateway,
+# which enforces it, and the workload, which decides cross-vendor install off
+# it, read the same value). Set to e.g. "yourorg.atlassian.net" or, for
+# cross-vendor kits, "auth.openai.com,chatgpt.com,api.openai.com".
+x-extra-allowed-domains: &extra_allowed_domains ""
+
+services:
+  workload:
+    image: mcr.microsoft.com/devcontainers/typescript-node:22
+    command: sleep infinity
+    # NOTE: credentials are NOT here — compose `environment:` values land in
+    # `docker inspect` and stopped-container metadata. They arrive per-session via
+    # devcontainer.json `remoteEnv` (injected at exec time, never stored in the
+    # container config). Only non-secret config lives below.
+    environment:
+      # Route ALL outbound through the gateway. The workload has no other path
+      # out, so anything that ignores these vars simply fails closed.
+      HTTP_PROXY: http://gateway:8888
+      HTTPS_PROXY: http://gateway:8888
+      http_proxy: http://gateway:8888
+      https_proxy: http://gateway:8888
+      # Loopback (local MCP servers) and in-cluster peers (gateway, sidecars)
+      # are reached directly, never through the proxy.
+      NO_PROXY: localhost,127.0.0.1,::1,gateway
+      no_proxy: localhost,127.0.0.1,::1,gateway
+      # Drives the cross-vendor install decision in setup-cross-vendor.sh.
+      EXTRA_ALLOWED_DOMAINS: *extra_allowed_domains
+      # Keep ALL Claude state (incl. ~/.claude.json) inside the persisted volume.
+      CLAUDE_CONFIG_DIR: /home/node/.claude
+    # No cap_add: the workload needs zero network privileges. Egress control
+    # lives in the gateway, not here.
+    networks:
+      - internal
+    volumes:
+      - ..:/workspace:cached
+      - claude-config:/home/node/.claude
+      - codex-config:/home/node/.codex
+      - bash-history:/commandhistory
+    depends_on:
+      - gateway
+
+  gateway:
+    build:
+      context: ./gateway
+    environment:
+      # The egress allowlist the proxy enforces. Same value as the workload's,
+      # via the anchor above.
+      EXTRA_ALLOWED_DOMAINS: *extra_allowed_domains
+      # Optional: forward host dev ports into the workload for local testing
+      # (comma-separated, e.g. "3000,8080"). Ingress only — no effect on egress.
+      # Each port listed here must ALSO be published below in `ports:`.
+      DEV_FORWARD_PORTS: ""
+    # To reach a dev server in the workload from the host without VS Code,
+    # uncomment and list the same ports as DEV_FORWARD_PORTS. Bind to 127.0.0.1
+    # so it's your machine only, not the LAN:
+    # ports:
+    #   - "127.0.0.1:3000:3000"
+    # On BOTH nets: `egress` is its only path to the internet; `internal` is how
+    # the workload reaches it. The gateway holds no credentials.
+    networks:
+      - egress
+      - internal
+
+networks:
+  # The gateway's only route to the internet. Project-scoped, so no unrelated
+  # container shares it.
+  egress: {}
+  # Workload <-> gateway <-> sidecars. `internal` = no gateway to the outside,
+  # so the workload (and any sidecar) has no direct egress and no external DNS.
+  internal:
+    internal: true
+
+volumes:
+  # Fixed names = shared per machine (one login per vendor per machine).
+  # Compose would otherwise prefix with the project.
+  claude-config:
+    name: agent-claude-config
+  codex-config:
+    name: agent-codex-config
+  bash-history:
+    name: agent-bash-history

@@ -1,0 +1,193 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/>
+    </marker>
+  </defs>
+  <style>
+    .grp { fill:none; stroke-width:2; stroke-dasharray:8 4; rx:10; }
+    .grplabel { font-size:14px; font-weight:bold; }
+    .box { stroke-width:1.5; }
+    .t { font-size:11px; fill:#222; }
+    .tb { font-size:11px; font-weight:bold; fill:#222; }
+    .ti { font-size:10px; font-style:italic; fill:#444; }
+    .edge { stroke:#555; stroke-width:1.5; fill:none; marker-end:url(#arrow); }
+    .edgelabel { font-size:9.5px; fill:#333; }
+  </style>
+
+  <!-- ================= HOST GROUP ================= -->
+  <rect class="grp" x="30" y="40" width="310" height="660" stroke="#666"/>
+  <text class="grplabel" x="45" y="62" fill="#444">Developer machine (macOS / Linux / WSL2)</text>
+
+  <rect class="box" x="55" y="80" width="260" height="96" fill="#d5e8d4" stroke="#82b366"/>
+  <text class="tb" x="65" y="98">sandbox CLI</text>
+  <text class="t" x="65" y="114">init: guided onboarding (~5 min)</text>
+  <text class="t" x="65" y="128">launch: resolve creds → up →</text>
+  <text class="t" x="65" y="142">boot manifest → claude</text>
+  <text class="ti" x="65" y="158">refuses to open on failed check</text>
+
+  <rect class="box" x="55" y="196" width="260" height="52" fill="#fff2cc" stroke="#d6b656"/>
+  <text class="tb" x="65" y="214">~/.agent/agent.env</text>
+  <text class="t" x="65" y="230">references only on disk — zero plaintext</text>
+
+  <rect class="box" x="55" y="268" width="260" height="72" fill="#fff2cc" stroke="#d6b656"/>
+  <text class="tb" x="65" y="286">secrets manager (1Password, sops, …)</text>
+  <text class="t" x="65" y="302">github-token · atlassian-token ·</text>
+  <text class="t" x="65" y="316">claude-setup-token</text>
+
+  <rect class="box" x="55" y="360" width="260" height="80" fill="#f8cecc" stroke="#b85450"/>
+  <text class="tb" x="65" y="378">managed-settings.json (MDM)</text>
+  <text class="t" x="65" y="394">bypass / auto mode DISABLED on host</text>
+  <text class="ti" x="65" y="410">autonomy only exists inside</text>
+  <text class="ti" x="65" y="424">the container</text>
+
+  <rect class="box" x="55" y="460" width="260" height="104" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text class="tb" x="65" y="478">Named volumes — machine-scoped</text>
+  <text class="t" x="65" y="494">agent-claude-config · agent-codex-config</text>
+  <text class="t" x="65" y="508">agent-bash-history · agent-gradle-cache</text>
+  <text class="ti" x="65" y="526">one login per vendor per machine;</text>
+  <text class="ti" x="65" y="540">auth + plugins survive rebuilds</text>
+
+  <rect class="box" x="55" y="584" width="260" height="52" fill="#d5e8d4" stroke="#82b366"/>
+  <text class="tb" x="65" y="602">browser → 127.0.0.1:3000</text>
+  <text class="t" x="65" y="618">dev-server ingress, published on gateway</text>
+
+  <text class="ti" x="55" y="660">Credentials are SESSION-scoped (remoteEnv):</text>
+  <text class="ti" x="55" y="674">a bare exec gets the base profile, no secrets.</text>
+
+  <!-- ================= DOCKER BOUNDARY GROUP ================= -->
+  <rect class="grp" x="400" y="40" width="620" height="660" stroke="#2e9a4e"/>
+  <text class="grplabel" x="415" y="62" fill="#2e7a42">docker — HOST-ENFORCED boundary (per repo, committed .devcontainer/)</text>
+
+  <!-- WORKLOAD -->
+  <rect class="box" x="420" y="80" width="340" height="380" fill="none" stroke="#666" stroke-width="2"/>
+  <text class="tb" x="432" y="100" font-size="12">WORKLOAD — the agent runs here</text>
+
+  <rect class="box" x="435" y="112" width="310" height="88" fill="#ffe6cc" stroke="#d79b00"/>
+  <text class="tb" x="445" y="130">check-agent-env.sh — boot manifest</text>
+  <text class="t" x="445" y="146">egress containment self-test</text>
+  <text class="t" x="445" y="160">auth preflight: claude / codex / github / jira</text>
+  <text class="t" x="445" y="174">refuses personal data-plane tokens;</text>
+  <text class="t" x="445" y="188">AGENT_REQUIRE_AUTH=1 hard-fails unattended</text>
+
+  <rect class="box" x="435" y="216" width="145" height="64" fill="#d5e8d4" stroke="#82b366"/>
+  <text class="tb" x="445" y="234">Claude Code</text>
+  <text class="t" x="445" y="250">auto mode default</text>
+  <text class="ti" x="445" y="264">classifier-supervised</text>
+
+  <rect class="box" x="598" y="216" width="147" height="64" fill="#d5e8d4" stroke="#82b366"/>
+  <text class="tb" x="608" y="234">Codex CLI · gh CLI</text>
+  <text class="t" x="608" y="250">cross-vendor opt-in;</text>
+  <text class="t" x="608" y="264">PRs as bot identity</text>
+
+  <rect class="box" x="435" y="296" width="310" height="52" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text class="tb" x="445" y="314">Workspace — bind mount, the repo ONLY</text>
+  <text class="t" x="445" y="330">no home dir, no ~/.ssh, no host secrets</text>
+
+  <rect class="box" x="435" y="364" width="310" height="80" fill="#f8cecc" stroke="#b85450"/>
+  <text class="tb" x="445" y="382">Network stance: contained by topology</text>
+  <text class="t" x="445" y="398">internal-only net · NO route to internet ·</text>
+  <text class="t" x="445" y="412">NO external DNS · NO NET_ADMIN</text>
+  <text class="ti" x="445" y="428">root + sudo allowed — harmless for egress</text>
+
+  <!-- GATEWAY -->
+  <rect class="box" x="790" y="80" width="210" height="380" fill="none" stroke="#666" stroke-width="2"/>
+  <text class="tb" x="802" y="100" font-size="12">GATEWAY — agent has NO root</text>
+
+  <rect class="box" x="805" y="112" width="180" height="120" fill="#f8cecc" stroke="#b85450"/>
+  <text class="tb" x="815" y="130">tinyproxy</text>
+  <text class="t" x="815" y="146">egress allowlist by</text>
+  <text class="t" x="815" y="160">HOSTNAME (CONNECT),</text>
+  <text class="t" x="815" y="174">default-DENY</text>
+  <text class="ti" x="815" y="192">rendered from base set +</text>
+  <text class="ti" x="815" y="206">EXTRA_ALLOWED_DOMAINS</text>
+
+  <rect class="box" x="805" y="248" width="180" height="64" fill="#d5e8d4" stroke="#82b366"/>
+  <text class="tb" x="815" y="266">socat :3000</text>
+  <text class="t" x="815" y="282">dev-port forward to the</text>
+  <text class="t" x="815" y="296">workload (opt-in ingress)</text>
+
+  <text class="ti" x="805" y="340">on BOTH networks:</text>
+  <text class="ti" x="805" y="354">internal (to workload) +</text>
+  <text class="ti" x="805" y="368">egress bridge (to internet)</text>
+  <text class="ti" x="805" y="396">boundary = docker topology,</text>
+  <text class="ti" x="805" y="410">not rules the agent can reach</text>
+  <text class="ti" x="805" y="424">(survives sudo iptables -F)</text>
+
+  <!-- SIDECARS -->
+  <rect class="box" x="420" y="490" width="580" height="90" fill="none" stroke="#9673a6" stroke-dasharray="6 3"/>
+  <text class="tb" x="432" y="510" fill="#6b4d80">Sidecars — internal net only, NO egress (declared in repo compose = reviewable)</text>
+  <rect class="box" x="435" y="522" width="180" height="46" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text class="t" x="445" y="540">postgres:16 — db:5432</text>
+  <text class="ti" x="445" y="556">no host port published</text>
+  <rect class="box" x="640" y="522" width="220" height="46" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text class="t" x="650" y="540">kafka / redis / … per repo</text>
+  <text class="ti" x="650" y="556">testcontainers replacement, no DinD</text>
+
+  <rect class="box" x="420" y="600" width="580" height="80" fill="#e1d5e7" stroke="#9673a6"/>
+  <text class="tb" x="432" y="620">Java variant</text>
+  <text class="t" x="432" y="636">JDK 21 feature · gradle cache volume · JVM proxy wiring ·</text>
+  <text class="t" x="432" y="650">build registries (Maven Central, Gradle portals, Spring, …)</text>
+  <text class="t" x="432" y="664">added to the gateway allowlist</text>
+
+  <!-- ================= EGRESS GROUP ================= -->
+  <rect class="grp" x="1060" y="40" width="310" height="500" stroke="#b85450"/>
+  <text class="grplabel" x="1075" y="62" fill="#8f3b36">Internet — via gateway only</text>
+
+  <rect class="box" x="1085" y="80" width="260" height="76" fill="#d5e8d4" stroke="#82b366"/>
+  <text class="tb" x="1095" y="98">api.anthropic.com · claude.ai</text>
+  <text class="t" x="1095" y="114">model requests — subscription token,</text>
+  <text class="t" x="1095" y="128">org key or gateway, via env precedence</text>
+  <text class="ti" x="1095" y="144">same image serves laptop and fleet</text>
+
+  <rect class="box" x="1085" y="176" width="260" height="62" fill="#d5e8d4" stroke="#82b366"/>
+  <text class="tb" x="1095" y="194">github.com · api.github.com</text>
+  <text class="t" x="1095" y="210">git push + gh pr create</text>
+  <text class="t" x="1095" y="224">as scoped bot / dev identity</text>
+
+  <rect class="box" x="1085" y="258" width="260" height="48" fill="#d5e8d4" stroke="#82b366"/>
+  <text class="tb" x="1095" y="276">registry.npmjs.org</text>
+  <text class="t" x="1095" y="292">+ build registries (java variant)</text>
+
+  <rect class="box" x="1085" y="326" width="260" height="76" fill="#ffe6cc" stroke="#d79b00"/>
+  <text class="tb" x="1095" y="344">EXTRA_ALLOWED_DOMAINS</text>
+  <text class="t" x="1095" y="360">yourorg.atlassian.net — Jira MCP,</text>
+  <text class="t" x="1095" y="374">svc account · api.openai.com — codex</text>
+  <text class="ti" x="1095" y="390">widening egress = a reviewed diff line</text>
+
+  <rect class="box" x="1085" y="422" width="260" height="90" fill="#f8cecc" stroke="#b85450"/>
+  <text class="tb" x="1095" y="442">EVERYTHING ELSE — DENIED</text>
+  <text class="t" x="1095" y="458">hostname allowlist: shared-CDN IPs</text>
+  <text class="t" x="1095" y="472">can't reach unlisted hosts;</text>
+  <text class="t" x="1095" y="486">no external DNS = no DNS tunnel</text>
+  <text class="ti" x="1095" y="502">verified: root, proxy env stripped — still no socket</text>
+
+  <!-- ================= LEGEND ================= -->
+  <rect class="box" x="1060" y="580" width="310" height="150" fill="#ffffff" stroke="#999999"/>
+  <text class="tb" x="1075" y="600">Legend</text>
+  <rect x="1075" y="612" width="14" height="10" fill="#d5e8d4" stroke="#82b366"/><text class="t" x="1096" y="621">tooling / allowed path</text>
+  <rect x="1075" y="630" width="14" height="10" fill="#fff2cc" stroke="#d6b656"/><text class="t" x="1096" y="639">credential material</text>
+  <rect x="1075" y="648" width="14" height="10" fill="#ffe6cc" stroke="#d79b00"/><text class="t" x="1096" y="657">gates &amp; per-repo decisions</text>
+  <rect x="1075" y="666" width="14" height="10" fill="#f8cecc" stroke="#b85450"/><text class="t" x="1096" y="675">enforcement / deny</text>
+  <rect x="1075" y="684" width="14" height="10" fill="#dae8fc" stroke="#6c8ebf"/><text class="t" x="1096" y="693">data &amp; storage</text>
+  <rect x="1075" y="702" width="14" height="10" fill="#e1d5e7" stroke="#9673a6"/><text class="t" x="1096" y="711">stack variant</text>
+
+  <!-- ================= EDGES ================= -->
+  <path class="edge" d="M 185 248 L 185 264"/>
+  <path class="edge" d="M 55 300 L 42 300 L 42 128 L 51 128"/>
+  <text class="edgelabel" x="46" y="212" transform="rotate(-90 46 212)">Touch ID · op run</text>
+  <path class="edge" d="M 315 128 L 370 128 L 370 156 L 431 156"/>
+  <text class="edgelabel" x="322" y="106">session-scoped env</text>
+  <text class="edgelabel" x="322" y="118">(remoteEnv)</text>
+  <path class="edge" d="M 315 512 L 370 512 L 370 470 L 420 470" stroke-dasharray="5 3"/>
+  <text class="edgelabel" x="322" y="496">auth persists</text>
+  <path class="edge" d="M 315 610 L 900 610 L 900 316" stroke-dasharray="5 3"/>
+  <text class="edgelabel" x="620" y="602">ingress: published port → socat → workload</text>
+  <path class="edge" d="M 745 248 L 801 248"/>
+  <text class="edgelabel" x="748" y="240">HTTPS_PROXY</text>
+  <text class="edgelabel" x="750" y="262">:8888</text>
+  <path class="edge" d="M 1000 160 L 1081 160"/>
+  <text class="edgelabel" x="1004" y="152">allowed CONNECT</text>
+  <path class="edge" d="M 590 460 L 590 486"/>
+  <text class="edgelabel" x="598" y="480">internal net</text>
+</svg>

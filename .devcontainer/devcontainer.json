@@ -1,0 +1,48 @@
+{
+  "name": "agent-sandbox",
+  // Compose-based: the workload plus its egress gateway start together. The
+  // workload has no direct internet route; the gateway is an allowlist proxy
+  // it cannot reconfigure. See README "Security model".
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "workload",
+  "workspaceFolder": "/workspace",
+
+  // Credentials arrive per-session from the launching process env (the `sandbox`
+  // wrapper resolves ~/.agent/agent.env). remoteEnv is injected at exec time and
+  // never stored in the container config — nothing in `docker inspect`.
+  "remoteEnv": {
+    "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "ANTHROPIC_AUTH_TOKEN": "${localEnv:ANTHROPIC_AUTH_TOKEN}",
+    "ANTHROPIC_BASE_URL": "${localEnv:ANTHROPIC_BASE_URL}",
+    "OPENAI_API_KEY": "${localEnv:OPENAI_API_KEY}",
+    "GITHUB_USER": "${localEnv:GITHUB_USER}",
+    "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
+    "ATLASSIAN_URL": "${localEnv:ATLASSIAN_URL}",
+    "ATLASSIAN_AGENT_EMAIL": "${localEnv:ATLASSIAN_AGENT_EMAIL}",
+    "ATLASSIAN_AGENT_TOKEN": "${localEnv:ATLASSIAN_AGENT_TOKEN}",
+    "AGENT_IDENTITY_PATTERN": "${localEnv:AGENT_IDENTITY_PATTERN}",
+    "AGENT_REQUIRE_AUTH": "${localEnv:AGENT_REQUIRE_AUTH}",
+    "AGENT_ALLOW_PERSONAL": "${localEnv:AGENT_ALLOW_PERSONAL}"
+  },
+
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
+    // gh reads GITHUB_TOKEN from the env automatically — PR delegation needs no login.
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+
+  "remoteUser": "node",
+
+  // chown: docker creates the named volumes root-owned; without it Claude/Codex
+  // can't write auth state and persistence silently fails. Then opt-in
+  // cross-vendor tooling (installed via the gateway-allowlisted npm registry).
+  "postCreateCommand": "sudo chown node:node /home/node/.claude /home/node/.codex /commandhistory && bash .devcontainer/setup-cross-vendor.sh",
+  "postStartCommand": "bash .devcontainer/check-agent-env.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["anthropic.claude-code"]
+    }
+  }
+}

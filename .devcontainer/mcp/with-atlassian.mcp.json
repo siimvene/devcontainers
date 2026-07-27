@@ -1,0 +1,18 @@
+{
+  "$comment": "Opt-in variant: merge into the repo's .mcp.json when the repo's tasks genuinely need Jira/Confluence access. uvx-launched (no docker-in-docker). Remember: (1) add your Atlassian domain to EXTRA_ALLOWED_DOMAINS in devcontainer.json, (2) credentials come from ~/.agent/agent.env — a scoped service identity, never a personal token, (3) READ_ONLY_MODE is a per-repo decision: keep true for context kits, set false for kits whose job includes updating tickets — the service account's project allowlist is the real boundary.",
+  "mcpServers": {
+    "atlassian": {
+      "command": "uvx",
+      "args": ["mcp-atlassian"],
+      "env": {
+        "CONFLUENCE_URL": "${ATLASSIAN_URL}/wiki",
+        "CONFLUENCE_USERNAME": "${ATLASSIAN_AGENT_EMAIL}",
+        "CONFLUENCE_API_TOKEN": "${ATLASSIAN_AGENT_TOKEN}",
+        "JIRA_URL": "${ATLASSIAN_URL}",
+        "JIRA_USERNAME": "${ATLASSIAN_AGENT_EMAIL}",
+        "JIRA_API_TOKEN": "${ATLASSIAN_AGENT_TOKEN}",
+        "READ_ONLY_MODE": "true"
+      }
+    }
+  }
+}

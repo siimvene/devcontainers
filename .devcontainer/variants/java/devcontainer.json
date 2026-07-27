@@ -1,0 +1,63 @@
+{
+  "name": "agent-sandbox-java",
+  // Compose-based: the workload, its egress gateway, and the declared sidecars
+  // (DB etc.) start together. Copy the base .devcontainer/ wholesale first, then
+  // overlay BOTH files from variants/java/ (replacing devcontainer.json, adding
+  // docker-compose.yml) — the gateway/ dir must be present alongside.
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "workload",
+  "workspaceFolder": "/workspace",
+
+  // Credentials arrive per-session via remoteEnv (injected at exec time, never
+  // stored in the container config — nothing in `docker inspect`).
+  "remoteEnv": {
+    "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "ANTHROPIC_AUTH_TOKEN": "${localEnv:ANTHROPIC_AUTH_TOKEN}",
+    "ANTHROPIC_BASE_URL": "${localEnv:ANTHROPIC_BASE_URL}",
+    "OPENAI_API_KEY": "${localEnv:OPENAI_API_KEY}",
+    "GITHUB_USER": "${localEnv:GITHUB_USER}",
+    "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
+    "ATLASSIAN_URL": "${localEnv:ATLASSIAN_URL}",
+    "ATLASSIAN_AGENT_EMAIL": "${localEnv:ATLASSIAN_AGENT_EMAIL}",
+    "ATLASSIAN_AGENT_TOKEN": "${localEnv:ATLASSIAN_AGENT_TOKEN}",
+    "AGENT_IDENTITY_PATTERN": "${localEnv:AGENT_IDENTITY_PATTERN}",
+    "AGENT_REQUIRE_AUTH": "${localEnv:AGENT_REQUIRE_AUTH}",
+    "AGENT_ALLOW_PERSONAL": "${localEnv:AGENT_ALLOW_PERSONAL}"
+  },
+
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    // Node stays the base image (claude-code needs it); Java rides on top.
+    "ghcr.io/devcontainers/features/java:1": {
+      "version": "21",
+      // The reference monorepo's build.gradle sets JavaLanguageVersion.of(25)
+      // as its compile toolchain — newer than this feature's primary
+      // "version" (21, which stays the JVM that runs Gradle itself). Rather
+      // than rely on Gradle's foojay-resolver auto-download at runtime (that
+      // goes through the gateway allowlist — api.foojay.io plus wherever it
+      // redirects to fetch the actual JDK — one more domain to punch through
+      // per JDK release), install it at build time instead (unrestricted
+      // network); Gradle auto-detects it via SDKMAN's candidates dir, wired
+      // up by configure-gradle-toolchains.sh below. Comma-separated if a repo
+      // needs more than one extra version; drop to "" if the repo's
+      // toolchain matches "version" and no extra JDK is needed.
+      "additionalVersions": "25",
+      "installGradle": false
+    }
+  },
+
+  "remoteUser": "node",
+
+  // Same contract as the base template, plus the gradle cache volume chown.
+  // No init-firewall: egress is enforced by the gateway, not in-container.
+  "postCreateCommand": "sudo chown node:node /home/node/.claude /home/node/.codex /home/node/.gradle /commandhistory && bash .devcontainer/setup-cross-vendor.sh && bash .devcontainer/configure-gradle-toolchains.sh",
+  "postStartCommand": "bash .devcontainer/check-agent-env.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["anthropic.claude-code"]
+    }
+  }
+}

@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# sandbox — run Claude Code inside the repo's devcontainer.
+# Install once per machine:  cp sandbox /opt/homebrew/bin/   (macOS)
+#                             install -D sandbox ~/.local/bin/sandbox   (Linux)
+#
+# Usage:
+#   sandbox init                 # one-time machine onboarding (guided, ~5 min)
+#   sandbox                      # interactive Claude in the current repo's container
+#   sandbox ~/git/some-repo      # same, for another repo
+#   sandbox -p "fix the tests"   # headless dispatch; any claude args pass through
+#
+# Mental model: watching it? `claude` (host, prompts on). Leaving it alone or
+# running auto mode? `sandbox` — autonomy lives inside the container.
+set -euo pipefail
+
+AGENT_ENV="${AGENT_ENV:-$HOME/.agent/agent.env}"
+
+# ─────────────────────────────── sandbox init ────────────────────────────────
+# Guided machine onboarding: prereqs → 1Password item → tokens (captured
+# straight into the vault, never onto disk) → agent.env with op:// refs →
+# host-side validation of every credential. Idempotent: reruns only fix gaps.
+if [ "${1:-}" = "init" ]; then
+  ok()   { printf '  \033[32m✔\033[0m %s\n' "$1"; }
+  bad()  { printf '  \033[31m✘\033[0m %s\n' "$1"; }
+  note() { printf '  \033[33m→\033[0m %s\n' "$1"; }
+  fail=0
+
+  case "$(uname -s)" in
+    Darwin) DOCKER_HINT="install Docker Desktop and start it"
+            OP_HINT="brew install --cask 1password-cli" ;;
+    *)      DOCKER_HINT="install docker and start it (Linux: add yourself to the docker group; Windows: use WSL2 + Docker Desktop WSL backend)"
+            OP_HINT="https://developer.1password.com/docs/cli/get-started/" ;;
+  esac
+  echo "── prerequisites ──"
+  command -v docker >/dev/null && docker info >/dev/null 2>&1 \
+    && ok "docker running" || { bad "docker not running — $DOCKER_HINT"; fail=1; }
+  command -v devcontainer >/dev/null \
+    && ok "devcontainer CLI $(devcontainer --version)" \
+    || { bad "devcontainer CLI missing — run: npm install -g --ignore-scripts @devcontainers/cli"; fail=1; }
+  command -v claude >/dev/null && ok "claude CLI" || { bad "claude CLI missing — install Claude Code first"; fail=1; }
+  command -v op >/dev/null && ok "1Password CLI" || note "1Password CLI not found (optional — plaintext fallback available)"
+  [ "$fail" -eq 1 ] && { echo "fix the above, rerun: sandbox init"; exit 1; }
+
+  OP_MODE=0
+  if command -v op >/dev/null && { op whoami >/dev/null 2>&1 || op vault list >/dev/null 2>&1; }; then
+    OP_MODE=1; ok "1Password CLI connected — secrets go to the vault"
+  else
+    if command -v op >/dev/null; then
+      bad "1Password CLI present but not connected (app → Settings → Developer → Integrate with CLI, then 'op vault list' once)"
+    else
+      bad "1Password CLI not installed ($OP_HINT)"
+    fi
+    note "falling back to PLAINTEXT ~/.agent/agent.env (chmod 600). Works, but secrets"
+    note "sit on disk — set up 1Password and rerun 'sandbox init' to migrate them off."
+    printf '  continue with plaintext fallback? [y/N]: '
+    read -r yn; case "$yn" in y|Y) ;; *) exit 1 ;; esac
+  fi
+
+  # Backend: field <name> reads an existing secret (vault, else current env
+  # file); store <name> <value> saves one. Plain values held in shell vars and
+  # written at the env-file step. Field↔env mapping is fixed.
+  var_for() { case "$1" in claude-token) echo CLAUDE_CODE_OAUTH_TOKEN;; github-token) echo GITHUB_TOKEN;; atlassian-token) echo ATLASSIAN_AGENT_TOKEN;; esac; }
+  plain_get() { [ -f "$AGENT_ENV" ] && grep "^$(var_for "$1")=" "$AGENT_ENV" | head -1 | cut -d= -f2- | grep -v "^op://" || true; }
+  if [ "$OP_MODE" -eq 1 ]; then
+    echo "── vault item ──"
+    VAULT="${SANDBOX_VAULT:-}"
+    if [ -z "$VAULT" ]; then
+      printf '  vault to keep agent credentials in [Employee]: '
+      read -r VAULT; VAULT="${VAULT:-Employee}"
+    fi
+    ITEM="${SANDBOX_ITEM:-agent-sandbox}"
+    if op item get "$ITEM" --vault "$VAULT" >/dev/null 2>&1; then
+      ok "item '$ITEM' exists in vault '$VAULT'"
+    else
+      op item create --category "API Credential" --vault "$VAULT" --title "$ITEM" >/dev/null \
+        && ok "created item '$ITEM' in vault '$VAULT'" \
+        || { bad "could not create item (vault name? permissions?)"; exit 1; }
+    fi
+    ref() { printf 'op://%s/%s/%s' "$VAULT" "$ITEM" "$1"; }
+    field() {
+      v=$(op read "$(ref "$1")" 2>/dev/null || true)
+      if [ -z "$v" ]; then
+        # migrate a plaintext value left by a pre-1Password init
+        v=$(plain_get "$1")
+        [ -n "$v" ] && store "$1" "$v" && note "migrated $1 from plaintext file into the vault"
+      fi
+      printf '%s' "$v"
+    }
+    store() { op item edit "$ITEM" --vault "$VAULT" "$1[password]=$2" >/dev/null; }
+  else
+    ref() { case "$1" in claude-token) printf '%s' "$PLAIN_CT";; github-token) printf '%s' "$PLAIN_GT";; atlassian-token) printf '%s' "$PLAIN_AT";; esac; }
+    field() { case "$1" in claude-token) printf '%s' "$PLAIN_CT";; github-token) printf '%s' "$PLAIN_GT";; atlassian-token) printf '%s' "$PLAIN_AT";; esac; }
+    store() { case "$1" in claude-token) PLAIN_CT="$2";; github-token) PLAIN_GT="$2";; atlassian-token) PLAIN_AT="$2";; esac; }
+    PLAIN_CT=$(plain_get claude-token); PLAIN_GT=$(plain_get github-token); PLAIN_AT=$(plain_get atlassian-token)
+  fi
+
+  echo "── claude (setup-token, 1-year) ──"
+  v=$(field claude-token)
+  case "$v" in
+    sk-ant*) ok "claude-token present" ;;
+    *) note "browser will open — approve, token is captured directly into the vault"
+       t=$(claude setup-token 2>/dev/null | grep -oE 'sk-ant-[A-Za-z0-9_-]+' | tail -1)
+       case "$t" in
+         sk-ant*) store claude-token "$t" && ok "claude-token stored" ;;
+         *) bad "could not capture token — run 'claude setup-token', paste result:"
+            printf '  token: '; read -rs t; echo
+            case "$t" in sk-ant*) store claude-token "$t" && ok "claude-token stored";;
+            *) bad "that does not look like a Claude token (sk-ant-…) — skipped"; fail=1;; esac ;;
+       esac ;;
+  esac
+
+  echo "── github ──"
+  v=$(field github-token)
+  case "$v" in
+    ghp_*|github_pat_*|gho_*) ok "github-token present" ;;
+    ATATT*) bad "github-token field holds an ATLASSIAN token — fix the item"; fail=1 ;;
+    *) if command -v gh >/dev/null && ! gh auth token >/dev/null 2>&1; then
+         printf '  gh CLI found but not logged in — run browser login now? [Y/n]: '
+         read -r yn; case "$yn" in n|N) ;; *) gh auth login --web --git-protocol https || true ;; esac
+       fi
+       if command -v gh >/dev/null && gh auth token >/dev/null 2>&1; then
+         note "storing your gh CLI token (broad scope — swap for a fine-grained PAT when convenient)"
+         store github-token "$(gh auth token)" && ok "github-token stored from gh CLI"
+       else
+         note "no gh login found. Mint a fine-grained PAT (github.com → Settings → Developer settings)"
+         printf '  paste PAT (or Enter to skip): '; read -rs t; echo
+         case "$t" in
+           ghp_*|github_pat_*) store github-token "$t" && ok "github-token stored" ;;
+           "") note "skipped — PR delegation disabled until set" ;;
+           ATATT*) bad "that is an Atlassian token, not GitHub — skipped"; fail=1 ;;
+           *) bad "unrecognized token format — skipped"; fail=1 ;;
+         esac
+       fi ;;
+  esac
+
+  echo "── atlassian (optional — Enter to skip) ──"
+  v=$(field atlassian-token)
+  if printf '%s' "$v" | grep -q "^ATATT"; then ok "atlassian-token present"; else
+    note "create at: id.atlassian.com → Security → API tokens"
+    printf '  paste token (or Enter to skip): '; read -rs t; echo
+    case "$t" in
+      ATATT*) store atlassian-token "$t" && ok "atlassian-token stored" ;;
+      "") note "skipped — Jira/Confluence MCP disabled until set" ;;
+      *) bad "Atlassian tokens start with ATATT — skipped"; fail=1 ;;
+    esac
+  fi
+  ATL_URL=""; ATL_EMAIL=""
+  if printf '%s' "$(field atlassian-token)" | grep -q "^ATATT"; then
+    while :; do
+      printf '  Atlassian URL (e.g. https://yourorg.atlassian.net): '; read -r ATL_URL
+      case "$ATL_URL" in https://*) break ;; *) bad "full https:// URL, please" ;; esac
+    done
+    while :; do
+      printf '  account email for that token: '; read -r ATL_EMAIL
+      case "$ATL_EMAIL" in *@*) break ;; *) bad "no @ in that email — again" ;; esac
+    done
+  fi
+
+  echo "── writing $AGENT_ENV ──"
+  mkdir -p "$(dirname "$AGENT_ENV")"
+  [ -f "$AGENT_ENV" ] && { cp "$AGENT_ENV" "$AGENT_ENV.bak"; note "existing file backed up to agent.env.bak"; }
+  {
+    if [ "$OP_MODE" -eq 1 ]; then
+      echo "# generated by 'sandbox init' $(date +%F) — references only, secrets live in 1Password"
+    else
+      echo "# generated by 'sandbox init' $(date +%F) — PLAINTEXT fallback; set up 1Password and rerun init to migrate"
+    fi
+    echo "CLAUDE_CODE_OAUTH_TOKEN=$(ref claude-token)"
+    echo "GITHUB_TOKEN=$(ref github-token)"
+    if [ -n "$ATL_EMAIL" ]; then
+      echo "ATLASSIAN_URL=$ATL_URL"
+      echo "ATLASSIAN_AGENT_EMAIL=$ATL_EMAIL"
+      echo "ATLASSIAN_AGENT_TOKEN=$(ref atlassian-token)"
+      echo "# personal Atlassian identity accepted in-box (attended) until an svc- account exists"
+      echo "AGENT_ALLOW_PERSONAL=1"
+    fi
+  } > "$AGENT_ENV"
+  chmod 600 "$AGENT_ENV"
+  if [ "$OP_MODE" -eq 1 ]; then
+    ok "agent.env written (op:// references, zero plaintext)"
+  else
+    ok "agent.env written (plaintext, chmod 600 — migrate via 1Password + rerun init)"
+  fi
+
+  echo "── validation (host-side, live) ──"
+  t=$(field claude-token); case "$t" in sk-ant*) ok "claude token: shape valid (sk-ant…, ${#t} chars)";; *) bad "claude token missing/odd"; fail=1;; esac
+  t=$(field github-token)
+  if [ -n "$t" ]; then
+    login=$(curl -sf -H "Authorization: Bearer $t" https://api.github.com/user 2>/dev/null | grep -o '"login": *"[^"]*"' | cut -d'"' -f4)
+    [ -n "$login" ] && ok "github: authenticates as '$login'" || { bad "github token rejected (401?)"; fail=1; }
+  fi
+  if [ -n "$ATL_EMAIL" ]; then
+    t=$(field atlassian-token)
+    name=$(curl -sf --max-time 10 -u "$ATL_EMAIL:$t" "$ATL_URL/rest/api/2/myself" 2>/dev/null | grep -o '"displayName":"[^"]*"' | cut -d'"' -f4)
+    [ -n "$name" ] && ok "atlassian: authenticates as '$name'" || { bad "atlassian identity check failed (token/email/URL)"; fail=1; }
+  fi
+
+  echo
+  if [ "$fail" -eq 0 ]; then
+    echo "done. Next: cd <repo-with-.devcontainer> && sandbox"
+  else
+    echo "finished with warnings — fix the ✘ lines and rerun: sandbox init"
+  fi
+  exit "$fail"
+fi
+# ────────────────────────────── end sandbox init ─────────────────────────────
+
+resolved=0
+if [ "${1:-}" = "--resolved" ]; then resolved=1; shift; fi
+
+dir="."
+if [ $# -gt 0 ] && [ -d "$1" ]; then dir="$1"; shift; fi
+
+if [ ! -e "$dir/.devcontainer/devcontainer.json" ] && [ ! -e "$dir/.devcontainer.json" ]; then
+  echo "sandbox: no .devcontainer in $dir — copy .devcontainer/ from this repo first" >&2
+  exit 1
+fi
+
+# Resolve credentials into this process env; the container reads them via
+# remoteEnv per session. 1Password mode: agent.env holds op:// references only
+# (plaintext never touches disk; Touch ID unlocks). Plain mode: values sourced.
+if [ -f "$AGENT_ENV" ] && [ "$resolved" -eq 0 ]; then
+  if grep -q "op://" "$AGENT_ENV" && command -v op >/dev/null; then
+    # Re-exec via bash explicitly (not "$0" directly): on native Windows, `op`
+    # is a Go binary that launches the target via CreateProcess, which cannot
+    # interpret a shebang line — only bash.exe itself is a real executable it
+    # can find and run. Harmless no-op on macOS/Linux, where execve("$0",...)
+    # would have worked either way.
+    exec op run --env-file "$AGENT_ENV" --no-masking -- bash "$0" --resolved "$dir" "$@"
+  else
+    set -a; . "$AGENT_ENV"; set +a
+    # Generic secrets-manager hook: if agent.env sets AGENT_ENV_COMMAND, run it
+    # and source the KEY=value lines it prints (sops, infisical, bws, pass, …).
+    # Secrets then exist only in this process env for this session, same
+    # contract as op run. See agent.env.example for per-backend one-liners.
+    if [ -n "${AGENT_ENV_COMMAND:-}" ]; then
+      set -a; . <(eval "$AGENT_ENV_COMMAND"); set +a
+    fi
+  fi
+fi
+
+out=$(devcontainer up --workspace-folder "$dir" 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
+printf '%s\n' "$out" | grep -E 'WARNING' || true
+
+# Boot manifest on EVERY launch (a warm container skips postStart): run the
+# check with this session's resolved credentials; refuse to open on failure.
+if ! devcontainer exec --workspace-folder "$dir" bash .devcontainer/check-agent-env.sh; then
+  echo "sandbox: boot check refused this session (see above)" >&2
+  exit 1
+fi
+
+exec devcontainer exec --workspace-folder "$dir" claude "$@"

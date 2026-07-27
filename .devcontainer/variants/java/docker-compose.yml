@@ -1,0 +1,94 @@
+# Java agent sandbox — gateway egress model plus a compose sidecar.
+#
+# Same host-enforced boundary as the base: the workload has no direct internet
+# route (internal network only, no NET_ADMIN); all outbound goes through the
+# `gateway` allowlist proxy. The DB sidecar is internal-only too, so a superuser
+# COPY ... FROM PROGRAM shell in it also reaches nowhere. See README.
+
+# Egress allowlist additions: the Java build plane (Maven Central, Gradle
+# portals, Spring, jitpack, Mulesoft, GitHub Packages, nodejs.org for
+# gradle-node-plugin frontends) on top of the base set — the reference shape
+# is a Spring/Gradle monorepo with an embedded webpack frontend module (the
+# ticketing monorepo shape). Extend further to match the repo's build.gradle
+# repositories{}. jcenter.bintray.com is included even though the service
+# itself was decommissioned in 2021 — some legacy build.gradle files still
+# declare it as a repository (never actually resolved from) and Gradle errors
+# on an unreachable-by-policy host before it gets the chance to not need it.
+# For cross-vendor kits, append "auth.openai.com,chatgpt.com,api.openai.com".
+x-extra-allowed-domains: &extra_allowed_domains "repo.maven.apache.org,repo1.maven.org,services.gradle.org,plugins.gradle.org,plugins-artifacts.gradle.org,repo.spring.io,jitpack.io,maven.pkg.github.com,github-registry-files.githubusercontent.com,jcenter.bintray.com,repository.mulesoft.org,nodejs.org"
+
+services:
+  workload:
+    image: mcr.microsoft.com/devcontainers/typescript-node:22
+    command: sleep infinity
+    # Credentials arrive via devcontainer.json remoteEnv (not here — compose
+    # `environment:` values are visible in `docker inspect`). Only non-secret
+    # config below.
+    environment:
+      # Route ALL outbound through the gateway; no other path out.
+      HTTP_PROXY: http://gateway:8888
+      HTTPS_PROXY: http://gateway:8888
+      http_proxy: http://gateway:8888
+      https_proxy: http://gateway:8888
+      # `db` (and any sidecar) is reached directly on the internal net, not via
+      # the proxy; loopback covers local MCP servers.
+      NO_PROXY: localhost,127.0.0.1,::1,gateway,db
+      no_proxy: localhost,127.0.0.1,::1,gateway,db
+      # The JVM ignores *_PROXY env vars — Gradle/Maven need explicit system
+      # properties, or wrapper download and dependency resolution fail closed.
+      JAVA_TOOL_OPTIONS: "-Dhttp.proxyHost=gateway -Dhttp.proxyPort=8888 -Dhttps.proxyHost=gateway -Dhttps.proxyPort=8888 -Dhttp.nonProxyHosts=localhost|127.0.0.1|db|gateway"
+      EXTRA_ALLOWED_DOMAINS: *extra_allowed_domains
+      CLAUDE_CONFIG_DIR: /home/node/.claude
+    networks:
+      - internal
+    volumes:
+      - ..:/workspace:cached
+      - claude-config:/home/node/.claude
+      - codex-config:/home/node/.codex
+      - bash-history:/commandhistory
+      - gradle-cache:/home/node/.gradle
+    depends_on:
+      - gateway
+
+  gateway:
+    # Resolves once these files sit in the repo's .devcontainer/ alongside the
+    # copied gateway/ dir (see README "Java / compose-sidecar variant").
+    build:
+      context: ./gateway
+    environment:
+      EXTRA_ALLOWED_DOMAINS: *extra_allowed_domains
+      # Optional host dev-port forwarding (comma-separated, e.g. "8080"); each
+      # port must also be published in `ports:` below. Ingress only.
+      DEV_FORWARD_PORTS: ""
+    # ports:
+    #   - "127.0.0.1:8080:8080"
+    networks:
+      - egress
+      - internal
+
+  # Sidecar example: postgres for integration tests / jOOQ-style codegen.
+  # Reachable from the workload as db:5432; internal-only, no egress. Delete or
+  # extend (kafka, redis, ...) per repo.
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    networks:
+      - internal
+
+networks:
+  egress: {}
+  internal:
+    internal: true
+
+volumes:
+  # Fixed names = shared per machine (one login per vendor per machine, gradle
+  # cache reused across repos). Compose would otherwise prefix with the project.
+  claude-config:
+    name: agent-claude-config
+  codex-config:
+    name: agent-codex-config
+  bash-history:
+    name: agent-bash-history
+  gradle-cache:
+    name: agent-gradle-cache
