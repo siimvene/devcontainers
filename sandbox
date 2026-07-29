@@ -6,6 +6,7 @@
 # Usage:
 #   sandbox init                 # one-time machine onboarding (guided, ~5 min)
 #   sandbox sync [dir]           # refresh the repo's .devcontainer from its template source
+#   sandbox rebuild [dir]        # recreate the container (after sync/compose changes), then Claude
 #   sandbox                      # interactive Claude in the current repo's container
 #   sandbox ~/git/some-repo      # same, for another repo
 #   sandbox -p "fix the tests"   # headless dispatch; any claude args pass through
@@ -285,6 +286,12 @@ fi
 resolved=0
 if [ "${1:-}" = "--resolved" ]; then resolved=1; shift; fi
 
+# rebuild (alias: up): recreate the container so .devcontainer changes — new
+# compose env, synced template — actually apply. A warm `sandbox` reuses the
+# existing container and picks up none of that.
+rebuild=""
+case "${1:-}" in rebuild|up|--rebuild) rebuild="--remove-existing-container"; shift ;; esac
+
 dir="."
 if [ $# -gt 0 ] && [ -d "$1" ]; then dir="$1"; shift; fi
 
@@ -303,7 +310,7 @@ if [ -f "$AGENT_ENV" ] && [ "$resolved" -eq 0 ]; then
     # interpret a shebang line — only bash.exe itself is a real executable it
     # can find and run. Harmless no-op on macOS/Linux, where execve("$0",...)
     # would have worked either way.
-    exec op run --env-file "$AGENT_ENV" --no-masking -- bash "$0" --resolved "$dir" "$@"
+    exec op run --env-file "$AGENT_ENV" --no-masking -- bash "$0" --resolved ${rebuild:+--rebuild} "$dir" "$@"
   else
     set -a; . "$AGENT_ENV"; set +a
     # Generic secrets-manager hook: if agent.env sets AGENT_ENV_COMMAND, run it
@@ -316,7 +323,8 @@ if [ -f "$AGENT_ENV" ] && [ "$resolved" -eq 0 ]; then
   fi
 fi
 
-out=$(devcontainer up --workspace-folder "$dir" 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
+[ -n "$rebuild" ] && echo "sandbox: recreating container (rebuild) ..."
+out=$(devcontainer up --workspace-folder "$dir" $rebuild 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
 printf '%s\n' "$out" | grep -E 'WARNING' || true
 
 # Boot manifest on EVERY launch (a warm container skips postStart): run the
