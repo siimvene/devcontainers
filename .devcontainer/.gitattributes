@@ -1,0 +1,4 @@
+# Force LF for everything in the template: these files execute inside the Linux
+# container (boot check, gateway entrypoint, setup scripts) — a Windows checkout
+# with core.autocrlf=true would otherwise convert them to CRLF and break every boot.
+* text eol=lf
