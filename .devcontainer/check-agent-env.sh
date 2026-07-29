@@ -31,13 +31,13 @@ fi
 # update-nag click, unattended runs gain currency they otherwise never get.
 # Best-effort with hard timeouts: offline = run cached versions, say so.
 if command -v claude >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
-  if timeout 30 claude plugin marketplace update >/dev/null 2>&1; then
+  if timeout -k 5 25 claude plugin marketplace update </dev/null >/dev/null 2>&1; then
     updated=""
     while read -r pid pscope; do
       [ -n "$pid" ] || continue
-      out=$(timeout 30 claude plugin update "$pid" --scope "$pscope" 2>&1) || continue
+      out=$(timeout -k 5 25 claude plugin update "$pid" --scope "$pscope" </dev/null 2>&1) || continue
       printf '%s' "$out" | grep -qiE 'already|up.to.date|latest' || updated="$updated $pid"
-    done < <(claude plugin list --json 2>/dev/null | node -e '
+    done < <(timeout -k 5 15 claude plugin list --json </dev/null 2>/dev/null | node -e '
       let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
         try{ for (const p of JSON.parse(d)) if (p.enabled && p.id && p.scope) console.log(p.id, p.scope) }catch(e){}
       })')
