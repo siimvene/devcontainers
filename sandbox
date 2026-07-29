@@ -42,16 +42,25 @@ if [ "${1:-}" = "init" ]; then
   [ "$fail" -eq 1 ] && { echo "fix the above, rerun: sandbox init"; exit 1; }
 
   OP_MODE=0
-  if command -v op >/dev/null && { op whoami >/dev/null 2>&1 || op vault list >/dev/null 2>&1; }; then
-    OP_MODE=1; ok "1Password CLI connected — secrets go to the vault"
+  if command -v op >/dev/null; then
+    note "checking 1Password CLI connection — Ctrl+C skips 1Password (Windows: op can hang waiting on a desktop-app prompt)"
+    # trap keeps Ctrl+C from killing init: it kills the hanging `op` child,
+    # the check comes back non-zero, and we continue into the fallback path.
+    trap ':' INT
+    if op whoami >/dev/null 2>&1 || op vault list >/dev/null 2>&1; then OP_MODE=1; fi
+    trap - INT
+  fi
+  if [ "$OP_MODE" -eq 1 ]; then
+    ok "1Password CLI connected — secrets go to the vault"
   else
     if command -v op >/dev/null; then
-      bad "1Password CLI present but not connected (app → Settings → Developer → Integrate with CLI, then 'op vault list' once)"
+      bad "1Password CLI present but not connected/skipped (app → Settings → Developer → Integrate with CLI, then 'op vault list' once)"
     else
       bad "1Password CLI not installed ($OP_HINT)"
     fi
     note "falling back to PLAINTEXT ~/.agent/agent.env (chmod 600). Works, but secrets"
-    note "sit on disk — set up 1Password and rerun 'sandbox init' to migrate them off."
+    note "sit on disk — set up 1Password and rerun 'sandbox init' to migrate them off,"
+    note "or wire any other secrets manager via AGENT_ENV_COMMAND (see agent.env.example)."
     printf '  continue with plaintext fallback? [y/N]: '
     read -r yn; case "$yn" in y|Y) ;; *) exit 1 ;; esac
   fi
