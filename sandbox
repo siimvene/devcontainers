@@ -338,9 +338,18 @@ if [ -f "$AGENT_ENV" ] && [ "$resolved" -eq 0 ]; then
   fi
 fi
 
-[ -n "$rebuild" ] && echo "sandbox: recreating container (rebuild) ..."
-out=$(devcontainer up --workspace-folder "$dir" $rebuild 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
-printf '%s\n' "$out" | grep -E 'WARNING' || true
+# Warm starts run captured-and-quiet (seconds; only WARNINGs surface).
+# Slow paths — explicit rebuild, or no container exists yet — stream the
+# build live: minutes of silence with activity visible only in the terminal
+# title bar reads as a hang.
+repo_name=$(basename "$(cd "$dir" && pwd)")
+if [ -n "$rebuild" ] || ! docker ps -aq -f "name=${repo_name}_devcontainer" 2>/dev/null | grep -q .; then
+  [ -n "$rebuild" ] && echo "sandbox: recreating container (rebuild) ..." || echo "sandbox: first build for this repo — streaming ..."
+  devcontainer up --workspace-folder "$dir" $rebuild || exit 1
+else
+  out=$(devcontainer up --workspace-folder "$dir" 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
+  printf '%s\n' "$out" | grep -E 'WARNING' || true
+fi
 
 # Boot manifest on EVERY launch (a warm container skips postStart): run the
 # check with this session's resolved credentials; refuse to open on failure.
