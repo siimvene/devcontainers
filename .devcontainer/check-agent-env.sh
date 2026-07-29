@@ -6,6 +6,24 @@ set -uo pipefail
 
 echo "── agent environment check ──"
 
+# Template freshness (best effort, never blocks): .devcontainer/TEMPLATE_VERSION
+# line 1 = version, line 2 = "<owner>/<repo> <path-in-repo>". Compared against
+# the same file on the source repo's default branch via api.github.com (in the
+# gateway base allowlist; GITHUB_TOKEN needed for private sources). Any failure
+# is silent — this is a nag, not a gate.
+VFILE="$(dirname "${BASH_SOURCE[0]}")/TEMPLATE_VERSION"
+if [ -f "$VFILE" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+  t_local=$(sed -n 1p "$VFILE")
+  t_src=$(sed -n 2p "$VFILE")
+  t_slug=${t_src%% *}; t_path=${t_src#* }; t_path=${t_path%/}; [ "$t_path" = "." ] && t_path="" || t_path="$t_path/"
+  t_up=$(curl -sf --max-time 4 -H "Authorization: Bearer $GITHUB_TOKEN" \
+    -H "Accept: application/vnd.github.raw" \
+    "https://api.github.com/repos/${t_slug}/contents/${t_path}.devcontainer/TEMPLATE_VERSION" 2>/dev/null | sed -n 1p)
+  if [ -n "$t_up" ] && [ "$t_up" != "$t_local" ]; then
+    echo "WARN: devcontainer template ${t_local} — upstream is ${t_up}. Run 'sandbox sync' on the host, review the diff, commit."
+  fi
+fi
+
 # First-run wizard skip: when Claude auth comes from the environment, seed the
 # onboarding flag on a fresh volume so interactive claude goes straight to the
 # prompt instead of forcing the login wizard (which ignores env tokens).

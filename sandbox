@@ -5,6 +5,7 @@
 #
 # Usage:
 #   sandbox init                 # one-time machine onboarding (guided, ~5 min)
+#   sandbox sync [dir]           # refresh the repo's .devcontainer from its template source
 #   sandbox                      # interactive Claude in the current repo's container
 #   sandbox ~/git/some-repo      # same, for another repo
 #   sandbox -p "fix the tests"   # headless dispatch; any claude args pass through
@@ -213,6 +214,33 @@ if [ "${1:-}" = "init" ]; then
   exit "$fail"
 fi
 # ────────────────────────────── end sandbox init ─────────────────────────────
+
+# ─────────────────────────────── sandbox sync ────────────────────────────────
+# Day-2 template maintenance: replace the repo's .devcontainer with the current
+# template from its source repo (named in .devcontainer/TEMPLATE_VERSION line 2),
+# then show the git diff. Overwrites INCLUDING deletions (retired files go away);
+# repo-specific customizations (extra allowlist domains, JDK versions) show up in
+# the diff — re-apply them before committing. Requires: gh (authenticated), git.
+if [ "${1:-}" = "sync" ]; then
+  dir="${2:-.}"
+  VFILE="$dir/.devcontainer/TEMPLATE_VERSION"
+  [ -f "$VFILE" ] || { echo "sandbox sync: no $VFILE — pre-freshness template; copy .devcontainer from the template repo once by hand" >&2; exit 1; }
+  command -v gh >/dev/null || { echo "sandbox sync: gh CLI required" >&2; exit 1; }
+  src=$(sed -n 2p "$VFILE"); slug=${src%% *}; tpath=${src#* }; tpath=${tpath%/}; [ "$tpath" = "." ] && tpath=""
+  tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+  echo "fetching ${slug} (${tpath:-repo root}) ..."
+  gh api "repos/${slug}/tarball/HEAD" > "$tmp/t.tgz" || { echo "sandbox sync: fetch failed (gh auth? repo access?)" >&2; exit 1; }
+  tar -xzf "$tmp/t.tgz" -C "$tmp" --strip-components=1
+  srcdir="$tmp/${tpath:+$tpath/}.devcontainer"
+  [ -d "$srcdir" ] || { echo "sandbox sync: $srcdir not found in source repo" >&2; exit 1; }
+  rsync -a --delete "$srcdir/" "$dir/.devcontainer/"
+  echo "synced. Review and commit:"
+  git -C "$dir" status --short -- .devcontainer 2>/dev/null || true
+  git -C "$dir" diff --stat -- .devcontainer 2>/dev/null || true
+  echo "(re-apply repo-specific customizations — allowlist domains, JDK — if the diff clobbered them)"
+  exit 0
+fi
+# ───────────────────────────── end sandbox sync ──────────────────────────────
 
 resolved=0
 if [ "${1:-}" = "--resolved" ]; then resolved=1; shift; fi
