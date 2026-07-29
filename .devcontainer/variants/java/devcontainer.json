@@ -54,7 +54,7 @@
 
   // Same contract as the base template, plus the gradle cache volume chown.
   // No init-firewall: egress is enforced by the gateway, not in-container.
-  "postCreateCommand": "mountpoint -q /home/node/.gradle || { echo 'ERROR: gradle-cache volume not mounted — you are running the java variant devcontainer.json against the BASE docker-compose.yml. Copy variants/java/docker-compose.yml over .devcontainer/docker-compose.yml and rebuild.'; exit 1; }; sudo chown node:node /home/node/.claude /home/node/.codex /home/node/.gradle /commandhistory && bash .devcontainer/setup-cross-vendor.sh && bash .devcontainer/configure-gradle-toolchains.sh",
+  "postCreateCommand": "mountpoint -q /home/node/.gradle || { echo 'ERROR: gradle-cache volume not mounted — you are running the java variant devcontainer.json against the BASE docker-compose.yml. Copy variants/java/docker-compose.yml over .devcontainer/docker-compose.yml and rebuild.'; exit 1; }; sudo chown node:node /home/node/.claude /home/node/.codex /home/node/.gradle /commandhistory && bash .devcontainer/setup-cross-vendor.sh && bash .devcontainer/variants/java/configure-gradle-toolchains.sh",
   "postStartCommand": "bash .devcontainer/check-agent-env.sh",
 
   "customizations": {
