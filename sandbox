@@ -239,7 +239,17 @@ if [ "${1:-}" = "sync" ]; then
   tar -xzf "$tmp/t.tgz" -C "$tmp" --strip-components=1
   srcdir="$tmp/${tpath:+$tpath/}.devcontainer"
   [ -d "$srcdir" ] || { echo "sandbox sync: $srcdir not found in source repo" >&2; exit 1; }
-  rsync -a --delete --exclude='.env' --exclude='TEMPLATE_VARIANT' "$srcdir/" "$dir/.devcontainer/"
+  # Portable replace-with-deletions (Git Bash ships no rsync): stash the
+  # repo-owned files, wipe, copy the template wholesale, restore the stash.
+  keep="$tmp/keep"; mkdir "$keep"
+  for f in .env TEMPLATE_VARIANT; do
+    [ -f "$dir/.devcontainer/$f" ] && cp "$dir/.devcontainer/$f" "$keep/$f"
+  done
+  rm -rf "$dir/.devcontainer"
+  cp -R "$srcdir" "$dir/.devcontainer"
+  for f in .env TEMPLATE_VARIANT; do
+    [ -f "$keep/$f" ] && cp "$keep/$f" "$dir/.devcontainer/$f"
+  done
   new_ver=$(sed -n 1p "$VFILE")
 
   if [ -n "$variant" ]; then

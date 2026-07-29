@@ -108,11 +108,13 @@ substitute for keeping those tokens scoped.
 ## Platforms
 
 macOS and Linux are first-class (Linux: native docker + the 1Password Linux app;
-managed settings at `/etc/claude-code/managed-settings.json`). **Windows is
-supported via WSL2 only** — inside WSL everything is the Linux flow (Docker
-Desktop WSL backend, `~/.agent` in the WSL home). No native PowerShell port;
-if anyone runs Claude Code natively outside WSL, verify the managed-settings
-enforcement path for that host separately.
+managed settings at `/etc/claude-code/managed-settings.json`). **Windows:
+native Git Bash is the supported path** — the `sandbox` wrapper and the
+template are field-tested under MINGW64 (Git for Windows) with Docker Desktop;
+no tools beyond what Git Bash ships are required. WSL2 works too and is just
+the Linux flow inside WSL. No PowerShell/cmd port. Native-Windows caveat:
+verify the managed-settings enforcement path for that host separately — the
+host-tier autonomy lockout is documented for macOS/Linux paths only.
 
 ## Setup (once per developer)
 
