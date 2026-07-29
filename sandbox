@@ -230,6 +230,8 @@ if [ "${1:-}" = "sync" ]; then
   [ -f "$VFILE" ] || { echo "sandbox sync: no $VFILE — pre-freshness template; copy .devcontainer from the template repo once by hand" >&2; exit 1; }
   command -v gh >/dev/null || { echo "sandbox sync: gh CLI required" >&2; exit 1; }
   old_ver=$(sed -n 1p "$VFILE")
+  chash() { find "$dir/.devcontainer" -type f ! -name '.env' -exec cksum {} \; 2>/dev/null | sort | cksum; }
+  pre_hash=$(chash)
   src=$(sed -n 2p "$VFILE"); slug=${src%% *}; tpath=${src#* }; tpath=${tpath%/}; [ "$tpath" = "." ] && tpath=""
   variant=""; [ -f "$dir/.devcontainer/TEMPLATE_VARIANT" ] && variant=$(head -1 "$dir/.devcontainer/TEMPLATE_VARIANT")
   anchor=$(grep -m1 '^x-extra-allowed-domains:' "$dir/.devcontainer/docker-compose.yml" 2>/dev/null | sed 's/^x-extra-allowed-domains: *&extra_allowed_domains *//')
@@ -278,6 +280,19 @@ if [ "${1:-}" = "sync" ]; then
     echo "review with: git diff .devcontainer   — then commit"
   else
     echo "note: .devcontainer is not tracked in git here — replaced in place, nothing to diff against"
+  fi
+  # Files changed ≠ container changed: compose/env edits only land on
+  # recreation. Say so — reviewed-then-applied stays two deliberate steps
+  # (sync is the reviewable half; rebuild kills a possibly-active session).
+  if [ "$pre_hash" != "$(chash)" ]; then
+    repo_name=$(basename "$(cd "$dir" && pwd)")
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${repo_name}_devcontainer"; then
+      echo "container is RUNNING on the previous template — apply with: sandbox rebuild"
+    else
+      echo "apply with: sandbox rebuild (next container start picks the changes up)"
+    fi
+  else
+    echo "no content changes — nothing to apply"
   fi
   exit 0
 fi
