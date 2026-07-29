@@ -39,6 +39,10 @@ services:
       JAVA_TOOL_OPTIONS: "-Dhttp.proxyHost=gateway -Dhttp.proxyPort=8888 -Dhttps.proxyHost=gateway -Dhttps.proxyPort=8888 -Dhttp.nonProxyHosts=localhost|127.0.0.1|db|gateway"
       EXTRA_ALLOWED_DOMAINS: *extra_allowed_domains
       CLAUDE_CONFIG_DIR: /home/node/.claude
+      # The image pins the Claude version (feature + devcontainer-lock.json);
+      # updates arrive via rebuild, not via the CLI mutating itself in-place.
+      # Also silences "Auto-update failed: no write permission to npm prefix".
+      DISABLE_AUTOUPDATER: "1"
     networks:
       - internal
     volumes:

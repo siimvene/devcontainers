@@ -36,6 +36,10 @@ services:
       EXTRA_ALLOWED_DOMAINS: *extra_allowed_domains
       # Keep ALL Claude state (incl. ~/.claude.json) inside the persisted volume.
       CLAUDE_CONFIG_DIR: /home/node/.claude
+      # The image pins the Claude version (feature + devcontainer-lock.json);
+      # updates arrive via rebuild, not via the CLI mutating itself in-place.
+      # Also silences "Auto-update failed: no write permission to npm prefix".
+      DISABLE_AUTOUPDATER: "1"
     # No cap_add: the workload needs zero network privileges. Egress control
     # lives in the gateway, not here.
     networks:
