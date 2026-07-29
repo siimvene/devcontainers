@@ -5,7 +5,14 @@
   // it cannot reconfigure. See README "Security model".
   "dockerComposeFile": "docker-compose.yml",
   "service": "workload",
-  "workspaceFolder": "/workspace",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  // Per-repo mount path: folder trust, project settings, and history key on the
+  // workspace path — a shared /workspace would make one trust decision cover
+  // every sandboxed repo on the machine. Compose can't substitute devcontainer
+  // variables, so initializeCommand (host-side, cwd = the workspace folder,
+  // node is guaranteed by the devcontainer CLI) writes .devcontainer/.env for
+  // compose interpolation of ${SANDBOX_REPO}. Gitignored; rewritten every up.
+  "initializeCommand": "node -e \"require('fs').writeFileSync(require('path').join('.devcontainer','.env'),'SANDBOX_REPO='+require('path').basename(process.cwd())+'\\n')\"",
 
   // Credentials arrive per-session from the launching process env (the `sandbox`
   // wrapper resolves ~/.agent/agent.env). remoteEnv is injected at exec time and

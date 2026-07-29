@@ -41,7 +41,7 @@ services:
     networks:
       - internal
     volumes:
-      - ..:/workspace:cached
+      - ..:/workspaces/${SANDBOX_REPO:-app}:cached
       - claude-config:/home/node/.claude
       - codex-config:/home/node/.codex
       - bash-history:/commandhistory
