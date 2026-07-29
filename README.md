@@ -245,6 +245,7 @@ then copy BOTH files from `.devcontainer/variants/java/` into `.devcontainer/`,
 ```bash
 cp .devcontainer/variants/java/devcontainer.json .devcontainer/devcontainer.json
 cp .devcontainer/variants/java/docker-compose.yml .devcontainer/docker-compose.yml
+printf 'java\n' > .devcontainer/TEMPLATE_VARIANT   # sandbox sync re-applies the variant
 ```
 
 Mixing the variant `devcontainer.json` with the base compose fails at postCreate

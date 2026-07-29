@@ -217,27 +217,57 @@ fi
 
 # ─────────────────────────────── sandbox sync ────────────────────────────────
 # Day-2 template maintenance: replace the repo's .devcontainer with the current
-# template from its source repo (named in .devcontainer/TEMPLATE_VERSION line 2),
-# then show the git diff. Overwrites INCLUDING deletions (retired files go away);
-# repo-specific customizations (extra allowlist domains, JDK versions) show up in
-# the diff — re-apply them before committing. Requires: gh (authenticated), git.
+# template from its source repo (TEMPLATE_VERSION line 2), then re-apply what is
+# the REPO's to keep, not the template's: the variant choice (TEMPLATE_VARIANT
+# file, e.g. "java" — written once at setup, survives every sync) and the egress
+# allowlist anchor (x-extra-allowed-domains — a repo decision, preserved
+# verbatim). Deletions propagate (retired template files go away). Requires:
+# gh (authenticated), rsync; git for the review diff.
 if [ "${1:-}" = "sync" ]; then
   dir="${2:-.}"
   VFILE="$dir/.devcontainer/TEMPLATE_VERSION"
   [ -f "$VFILE" ] || { echo "sandbox sync: no $VFILE — pre-freshness template; copy .devcontainer from the template repo once by hand" >&2; exit 1; }
   command -v gh >/dev/null || { echo "sandbox sync: gh CLI required" >&2; exit 1; }
+  old_ver=$(sed -n 1p "$VFILE")
   src=$(sed -n 2p "$VFILE"); slug=${src%% *}; tpath=${src#* }; tpath=${tpath%/}; [ "$tpath" = "." ] && tpath=""
+  variant=""; [ -f "$dir/.devcontainer/TEMPLATE_VARIANT" ] && variant=$(head -1 "$dir/.devcontainer/TEMPLATE_VARIANT")
+  anchor=$(grep -m1 '^x-extra-allowed-domains:' "$dir/.devcontainer/docker-compose.yml" 2>/dev/null | sed 's/^x-extra-allowed-domains: *&extra_allowed_domains *//')
+
   tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
   echo "fetching ${slug} (${tpath:-repo root}) ..."
   gh api "repos/${slug}/tarball/HEAD" > "$tmp/t.tgz" || { echo "sandbox sync: fetch failed (gh auth? repo access?)" >&2; exit 1; }
   tar -xzf "$tmp/t.tgz" -C "$tmp" --strip-components=1
   srcdir="$tmp/${tpath:+$tpath/}.devcontainer"
   [ -d "$srcdir" ] || { echo "sandbox sync: $srcdir not found in source repo" >&2; exit 1; }
-  rsync -a --delete "$srcdir/" "$dir/.devcontainer/"
-  echo "synced. Review and commit:"
-  git -C "$dir" status --short -- .devcontainer 2>/dev/null || true
-  git -C "$dir" diff --stat -- .devcontainer 2>/dev/null || true
-  echo "(re-apply repo-specific customizations — allowlist domains, JDK — if the diff clobbered them)"
+  rsync -a --delete --exclude='.env' --exclude='TEMPLATE_VARIANT' "$srcdir/" "$dir/.devcontainer/"
+  new_ver=$(sed -n 1p "$VFILE")
+
+  if [ -n "$variant" ]; then
+    if [ -d "$dir/.devcontainer/variants/$variant" ]; then
+      cp "$dir/.devcontainer/variants/$variant/devcontainer.json" "$dir/.devcontainer/devcontainer.json"
+      [ -f "$dir/.devcontainer/variants/$variant/docker-compose.yml" ] && \
+        cp "$dir/.devcontainer/variants/$variant/docker-compose.yml" "$dir/.devcontainer/docker-compose.yml"
+      echo "  variant '$variant' re-applied (from TEMPLATE_VARIANT)"
+    else
+      echo "  WARN: TEMPLATE_VARIANT names '$variant' but the template has no such variant"
+    fi
+  fi
+  if [ -n "$anchor" ]; then
+    cur=$(grep -m1 '^x-extra-allowed-domains:' "$dir/.devcontainer/docker-compose.yml" | sed 's/^x-extra-allowed-domains: *&extra_allowed_domains *//')
+    if [ "$cur" != "$anchor" ]; then
+      sed -i.bak "s|^x-extra-allowed-domains: &extra_allowed_domains .*|x-extra-allowed-domains: \&extra_allowed_domains $anchor|" \
+        "$dir/.devcontainer/docker-compose.yml" && rm -f "$dir/.devcontainer/docker-compose.yml.bak"
+      echo "  egress allowlist preserved: $anchor"
+    fi
+  fi
+
+  echo "template: ${old_ver} → ${new_ver}${variant:+  [$variant]}"
+  if git -C "$dir" ls-files --error-unmatch .devcontainer >/dev/null 2>&1; then
+    git -C "$dir" --no-pager diff --stat -- .devcontainer | tail -3
+    echo "review with: git diff .devcontainer   — then commit"
+  else
+    echo "note: .devcontainer is not tracked in git here — replaced in place, nothing to diff against"
+  fi
   exit 0
 fi
 # ───────────────────────────── end sandbox sync ──────────────────────────────
