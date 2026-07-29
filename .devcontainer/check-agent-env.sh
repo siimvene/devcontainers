@@ -11,7 +11,7 @@ echo "── agent environment check ──"
 # the same file on the source repo's default branch via api.github.com (in the
 # gateway base allowlist; GITHUB_TOKEN needed for private sources). Any failure
 # is silent — this is a nag, not a gate.
-VFILE="$(dirname "${BASH_SOURCE[0]}")/TEMPLATE_VERSION"
+VFILE="$(dirname "${BASH_SOURCE:-$0}")/TEMPLATE_VERSION"
 if [ -f "$VFILE" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
   t_local=$(sed -n 1p "$VFILE")
   t_src=$(sed -n 2p "$VFILE")
@@ -21,6 +21,33 @@ if [ -f "$VFILE" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
     "https://api.github.com/repos/${t_slug}/contents/${t_path}.devcontainer/TEMPLATE_VERSION" 2>/dev/null | sed -n 1p)
   if [ -n "$t_up" ] && [ "$t_up" != "$t_local" ]; then
     echo "WARN: devcontainer template ${t_local} — upstream is ${t_up}. Run 'sandbox sync' on the host, review the diff, commit."
+  fi
+fi
+
+# Plugin freshness — refresh-always: marketplace metadata + installed plugins
+# update BEFORE the session exists, so Claude's "restart required to apply" is
+# satisfied by construction. The consent boundary for a rules/behavior change
+# is the marketplace PR (reviewed there); attended sessions lose only the
+# update-nag click, unattended runs gain currency they otherwise never get.
+# Best-effort with hard timeouts: offline = run cached versions, say so.
+if command -v claude >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  if timeout 30 claude plugin marketplace update >/dev/null 2>&1; then
+    updated=""
+    while read -r pid pscope; do
+      [ -n "$pid" ] || continue
+      out=$(timeout 30 claude plugin update "$pid" --scope "$pscope" 2>&1) || continue
+      printf '%s' "$out" | grep -qiE 'already|up.to.date|latest' || updated="$updated $pid"
+    done < <(claude plugin list --json 2>/dev/null | node -e '
+      let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+        try{ for (const p of JSON.parse(d)) if (p.enabled && p.id && p.scope) console.log(p.id, p.scope) }catch(e){}
+      })')
+    if [ -n "$updated" ]; then
+      echo "plugins: updated${updated} — applied for this session"
+    else
+      echo "plugins: marketplace refreshed, all current"
+    fi
+  else
+    echo "plugins: refresh skipped (offline?) — running cached versions"
   fi
 fi
 
