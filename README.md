@@ -239,8 +239,17 @@ line, so an unattended run never discovers a missing second vendor mid-task.
 
 For Gradle/Java repos (Spring services, multi-module monorepos), copy the base
 `.devcontainer/` wholesale first (so `gateway/`, `check-agent-env.sh` etc. come along),
-then overlay BOTH files from `.devcontainer/variants/java/` — replacing
-`devcontainer.json` and adding `docker-compose.yml`. What changes:
+then copy BOTH files from `.devcontainer/variants/java/` into `.devcontainer/`,
+**overwriting** the base `devcontainer.json` AND the base `docker-compose.yml`:
+
+```bash
+cp .devcontainer/variants/java/devcontainer.json .devcontainer/devcontainer.json
+cp .devcontainer/variants/java/docker-compose.yml .devcontainer/docker-compose.yml
+```
+
+Mixing the variant `devcontainer.json` with the base compose fails at postCreate
+(the base compose carries no gradle volume, no JVM proxy wiring, and an empty
+build-registry allowlist) — the boot guard names this exact mistake. What changes:
 
 - **JDK 21** rides the node base image as a feature (claude-code needs node anyway);
   the gradle *wrapper* downloads the repo's pinned Gradle through the gateway.

@@ -2,8 +2,10 @@
   "name": "agent-sandbox-java",
   // Compose-based: the workload, its egress gateway, and the declared sidecars
   // (DB etc.) start together. Copy the base .devcontainer/ wholesale first, then
-  // overlay BOTH files from variants/java/ (replacing devcontainer.json, adding
-  // docker-compose.yml) — the gateway/ dir must be present alongside.
+  // copy BOTH files from variants/java/ into .devcontainer/, OVERWRITING the base
+  // devcontainer.json AND the base docker-compose.yml — this file with the base
+  // compose fails at postCreate (no gradle volume, no JVM proxy wiring, empty
+  // build allowlist). The gateway/ dir must be present alongside.
   "dockerComposeFile": "docker-compose.yml",
   "service": "workload",
   "workspaceFolder": "/workspace",
@@ -52,7 +54,7 @@
 
   // Same contract as the base template, plus the gradle cache volume chown.
   // No init-firewall: egress is enforced by the gateway, not in-container.
-  "postCreateCommand": "sudo chown node:node /home/node/.claude /home/node/.codex /home/node/.gradle /commandhistory && bash .devcontainer/setup-cross-vendor.sh && bash .devcontainer/configure-gradle-toolchains.sh",
+  "postCreateCommand": "mountpoint -q /home/node/.gradle || { echo 'ERROR: gradle-cache volume not mounted — you are running the java variant devcontainer.json against the BASE docker-compose.yml. Copy variants/java/docker-compose.yml over .devcontainer/docker-compose.yml and rebuild.'; exit 1; }; sudo chown node:node /home/node/.claude /home/node/.codex /home/node/.gradle /commandhistory && bash .devcontainer/setup-cross-vendor.sh && bash .devcontainer/configure-gradle-toolchains.sh",
   "postStartCommand": "bash .devcontainer/check-agent-env.sh",
 
   "customizations": {
