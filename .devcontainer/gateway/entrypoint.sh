@@ -12,6 +12,7 @@ set -euo pipefail
 BASE_DOMAINS="
   api.anthropic.com
   claude.ai
+  platform.claude.com
   statsig.anthropic.com
   sentry.io
   github.com
