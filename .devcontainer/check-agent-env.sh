@@ -126,6 +126,19 @@ if command -v curl >/dev/null; then
   fi
 fi
 
+# Credential-shape tripwires: catch host-side resolution failures HERE with a
+# name, instead of letting auth fail downstream with generic 401s/login links.
+for v in CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN ATLASSIAN_AGENT_TOKEN; do
+  val=$(eval "printf '%s' \"\${$v:-}\"")
+  [ -z "$val" ] && continue
+  case "$val" in
+    op://*) echo "WARN: $v is an UNRESOLVED op:// reference — 1Password resolution failed on the host (op CLI missing, locked, or not integrated); launch via 'sandbox', not directly" ;;
+  esac
+  if printf '%s' "$val" | grep -q "$(printf '\r')"; then
+    echo "WARN: $v contains a carriage return — the host env file was saved with Windows line endings; re-save ~/.agent/agent.env with LF (or rerun 'sandbox init')"
+  fi
+done
+
 # LLM auth preflight — vendor logins expire; fail before the task starts, not
 # mid-run. AGENT_REQUIRE_AUTH=1 (unattended repos/CI) turns warnings into exit 1.
 auth_missing=0
@@ -177,6 +190,11 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
   else
     echo "WARN: GITHUB_TOKEN set but identity could not be verified — git/gh calls will fail the same way"
   fi
+  # Builds that pull private packages (GitHub Packages maven/npm) read the
+  # username from GITHUB_USER; gradle's credentials{} fails on a null username
+  # even though the registry only checks the token.
+  [ -z "${GITHUB_USER:-}" ] && \
+    echo "note: GITHUB_USER not set — private package registries need it as basic-auth username; rerun 'sandbox init' on the host to capture it"
 fi
 
 if [ -z "${ATLASSIAN_AGENT_TOKEN:-}" ]; then

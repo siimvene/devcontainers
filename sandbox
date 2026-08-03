@@ -198,7 +198,16 @@ if [ "${1:-}" = "init" ]; then
   t=$(field github-token)
   if [ -n "$t" ]; then
     login=$(curl -sf -H "Authorization: Bearer $t" https://api.github.com/user 2>/dev/null | grep -o '"login": *"[^"]*"' | cut -d'"' -f4)
-    [ -n "$login" ] && ok "github: authenticates as '$login'" || { bad "github token rejected (401?)"; fail=1; }
+    if [ -n "$login" ]; then
+      ok "github: authenticates as '$login'"
+      # Package registries (GitHub Packages maven/npm) take the token as the
+      # basic-auth password but many build tools (gradle credentials{}) refuse
+      # a null username outright — persist the validated login (not a secret).
+      echo "GITHUB_USER=$login" >> "$AGENT_ENV"
+      ok "GITHUB_USER=$login written (build tools need a username besides the token)"
+    else
+      bad "github token rejected (401?)"; fail=1
+    fi
   fi
   if [ -n "$ATL_EMAIL" ]; then
     t=$(field atlassian-token)
@@ -319,7 +328,15 @@ fi
 # remoteEnv per session. 1Password mode: agent.env holds op:// references only
 # (plaintext never touches disk; Touch ID unlocks). Plain mode: values sourced.
 if [ -f "$AGENT_ENV" ] && [ "$resolved" -eq 0 ]; then
-  if grep -q "op://" "$AGENT_ENV" && command -v op >/dev/null; then
+  if grep -q "op://" "$AGENT_ENV" && ! command -v op >/dev/null; then
+    # Fail loudly: sourcing the file would hand sessions the LITERAL op://
+    # strings as tokens — auth then fails far downstream with no hint why.
+    echo "sandbox: $AGENT_ENV holds op:// references but the 1Password CLI (op) is not installed —" >&2
+    echo "  secrets cannot resolve. Install op and integrate it (app → Settings → Developer)," >&2
+    echo "  or rerun 'sandbox init' without op to switch to the plaintext fallback." >&2
+    exit 1
+  fi
+  if grep -q "op://" "$AGENT_ENV"; then
     # Re-exec via bash explicitly (not "$0" directly): on native Windows, `op`
     # is a Go binary that launches the target via CreateProcess, which cannot
     # interpret a shebang line — only bash.exe itself is a real executable it
