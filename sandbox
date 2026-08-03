@@ -343,6 +343,20 @@ fi
 # build live: minutes of silence with activity visible only in the terminal
 # title bar reads as a hang.
 repo_name=$(basename "$(cd "$dir" && pwd)")
+
+# Self-heal mount drift: `devcontainer up` reuses an existing container
+# (--no-recreate), so a workload created by an older template can mount the
+# repo at a path the current workspaceFolder no longer points at (e.g. the
+# pre-2026-07-29e shared /workspace). Every exec then dies with a cryptic
+# "chdir to cwd failed". Detect it and recreate instead of reusing.
+if [ -z "$rebuild" ]; then
+  cid=$(docker ps -aq -f "name=${repo_name}_devcontainer-workload" 2>/dev/null | head -1)
+  if [ -n "$cid" ] && ! docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$cid" 2>/dev/null \
+      | grep -qx "/workspaces/${repo_name}"; then
+    echo "sandbox: existing container mounts the repo at an outdated path — recreating ..."
+    rebuild="--remove-existing-container"
+  fi
+fi
 if [ -n "$rebuild" ] || ! docker ps -aq -f "name=${repo_name}_devcontainer" 2>/dev/null | grep -q .; then
   [ -n "$rebuild" ] && echo "sandbox: recreating container (rebuild) ..." || echo "sandbox: first build for this repo — streaming ..."
   devcontainer up --workspace-folder "$dir" $rebuild || exit 1
