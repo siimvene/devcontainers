@@ -266,6 +266,15 @@ build-registry allowlist) — the boot guard names this exact mistake. What chan
   Without it Gradle's wrapper download and dependency resolution fail closed.
 - **`agent-gradle-cache` volume** — the dependency world downloads once per machine,
   not once per rebuild.
+- **GitHub Packages credentials persist into that volume.** The boot check upserts
+  `githubUser`/`gitHubPrivateToken` (and `gpr.user`/`gpr.key`) into
+  `~/.gradle/gradle.properties` from the session env, so builds started from an
+  IDE attached to the container — IntelliJ or VS Code, which never pass through the
+  `sandbox` wrapper — resolve private dependencies too. Both engineer workflows are
+  first-class: agent-CLI sessions get the token per session, IDE sessions read the
+  materialized file. This puts the token at rest in a machine-local volume — the
+  same class as the vendor logins in `agent-claude-config` — so use a fine-grained
+  PAT (`packages: read`, forced expiry), which the boot check already pushes toward.
 - **Sidecars instead of testcontainers.** Docker-in-docker stays out of scope; the
   compose file declares integration-test services (postgres ships as the example) as
   siblings on the same `internal` network — **no egress** of their own, so a superuser

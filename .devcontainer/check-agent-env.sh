@@ -195,6 +195,24 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
   # even though the registry only checks the token.
   [ -z "${GITHUB_USER:-}" ] && \
     echo "note: GITHUB_USER not set — private package registries need it as basic-auth username; rerun 'sandbox init' on the host to capture it"
+
+  # IDE sessions (java variant): env-injected credentials exist only in
+  # wrapper-launched sessions, but builds started from IntelliJ/VS Code read
+  # ~/.gradle/gradle.properties in the persisted gradle volume. Materialize the
+  # GitHub Packages pair there so both workflows resolve private deps — same
+  # at-rest class as the vendor logins in agent-claude-config. Upsert, never
+  # append: token rotation propagates, toolchain lines survive. Username falls
+  # back to "token": the registry ignores it, gradle only refuses null.
+  if mountpoint -q "$HOME/.gradle" 2>/dev/null; then
+    gp="$HOME/.gradle/gradle.properties"
+    { [ -f "$gp" ] && grep -vE '^(githubUser|gitHubPrivateToken|gpr\.user|gpr\.key)=' "$gp" || true
+      echo "githubUser=${GITHUB_USER:-token}"
+      echo "gitHubPrivateToken=${GITHUB_TOKEN}"
+      echo "gpr.user=${GITHUB_USER:-token}"
+      echo "gpr.key=${GITHUB_TOKEN}"
+    } > "$gp.tmp" && mv "$gp.tmp" "$gp" && chmod 600 "$gp" \
+      && echo "gradle: GitHub Packages credentials written to gradle.properties (volume) — IDE-launched builds resolve private deps"
+  fi
 fi
 
 if [ -z "${ATLASSIAN_AGENT_TOKEN:-}" ]; then
