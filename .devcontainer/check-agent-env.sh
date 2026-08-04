@@ -215,6 +215,35 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
   fi
 fi
 
+# Org plugin provisioning — marketplaces and baseline plugins live in the
+# per-MACHINE volume, so a fresh machine has neither no matter how many repos
+# it clones. Add what the repo declares (compose x-plugin-* anchors) and is
+# missing. Runs after the github section: private marketplace clones need the
+# git credentials `gh auth setup-git` just wired. On IDE-launched sessions
+# (no GITHUB_TOKEN) a private add fails with a pointer to `sandbox`; the
+# volume keeps whatever the first wrapper session provisions.
+if command -v claude >/dev/null 2>&1; then
+  mkts_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/known_marketplaces.json"
+  IFS=','
+  for m in ${PLUGIN_MARKETPLACES:-}; do
+    m=$(printf '%s' "$m" | tr -d ' '); [ -z "$m" ] && continue
+    grep -qs "\"repo\": *\"$m\"" "$mkts_file" && continue
+    out=$(timeout -k 5 60 claude plugin marketplace add "$m" </dev/null 2>&1) \
+      && echo "plugins: marketplace '$m' added (machine volume)" \
+      || printf '%s' "$out" | grep -qi 'already' \
+      || echo "plugins: marketplace '$m' NOT added — private repo needs GITHUB_TOKEN; run 'sandbox' once to provision this machine"
+  done
+  for p in ${PLUGIN_BASELINE:-}; do
+    p=$(printf '%s' "$p" | tr -d ' '); [ -z "$p" ] && continue
+    timeout -k 5 15 claude plugin list </dev/null 2>/dev/null | grep -q "${p%%@*}" && continue
+    out=$(timeout -k 5 60 claude plugin install "$p" </dev/null 2>&1) \
+      && echo "plugins: '$p' installed (volume)" \
+      || printf '%s' "$out" | grep -qi 'already' \
+      || echo "plugins: '$p' NOT installed — is its marketplace available (see above)?"
+  done
+  unset IFS
+fi
+
 if [ -z "${ATLASSIAN_AGENT_TOKEN:-}" ]; then
   echo "profile: base (no MCP data sources wired) — agent reaches code + allowlisted registries only"
   exit 0

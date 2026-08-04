@@ -13,6 +13,16 @@
 # cross-vendor kits, "auth.openai.com,chatgpt.com,api.openai.com".
 x-extra-allowed-domains: &extra_allowed_domains ""
 
+# Org plugin provisioning (repo decisions, preserved by `sandbox sync`).
+# Marketplaces/plugins persist in the per-machine volume, NOT per repo — a
+# fresh machine has neither, so the boot check adds what is declared here and
+# missing. Marketplaces: "owner/repo" GitHub slugs, comma-separated. Baseline:
+# "plugin@marketplace" ids installed user-scope when absent. Private
+# marketplace repos need GITHUB_TOKEN, so an IDE-launched session may defer
+# provisioning to the first `sandbox` run; the volume keeps the result.
+x-plugin-marketplaces: &plugin_marketplaces ""
+x-plugin-baseline: &plugin_baseline ""
+
 services:
   workload:
     image: mcr.microsoft.com/devcontainers/typescript-node:22
@@ -34,6 +44,9 @@ services:
       no_proxy: localhost,127.0.0.1,::1,gateway
       # Drives the cross-vendor install decision in setup-cross-vendor.sh.
       EXTRA_ALLOWED_DOMAINS: *extra_allowed_domains
+      # Org plugin provisioning — consumed by the boot check (see anchors above).
+      PLUGIN_MARKETPLACES: *plugin_marketplaces
+      PLUGIN_BASELINE: *plugin_baseline
       # Keep ALL Claude state (incl. ~/.claude.json) inside the persisted volume.
       CLAUDE_CONFIG_DIR: /home/node/.claude
       # The image pins the Claude version (feature + devcontainer-lock.json);

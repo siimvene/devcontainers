@@ -243,7 +243,12 @@ if [ "${1:-}" = "sync" ]; then
   pre_hash=$(chash)
   src=$(sed -n 2p "$VFILE"); slug=${src%% *}; tpath=${src#* }; tpath=${tpath%/}; [ "$tpath" = "." ] && tpath=""
   variant=""; [ -f "$dir/.devcontainer/TEMPLATE_VARIANT" ] && variant=$(head -1 "$dir/.devcontainer/TEMPLATE_VARIANT")
-  anchor=$(grep -m1 '^x-extra-allowed-domains:' "$dir/.devcontainer/docker-compose.yml" 2>/dev/null | sed 's/^x-extra-allowed-domains: *&extra_allowed_domains *//')
+  # Repo-owned compose anchors preserved across sync (their values are repo
+  # decisions, not the template's): egress allowlist + plugin provisioning.
+  anchor_val() { al=$(printf '%s' "$1" | sed 's/^x-//;s/-/_/g'); grep -m1 "^$1:" "$2" 2>/dev/null | sed "s/^$1: *&$al *//"; }
+  a_domains=$(anchor_val x-extra-allowed-domains "$dir/.devcontainer/docker-compose.yml")
+  a_mkts=$(anchor_val x-plugin-marketplaces "$dir/.devcontainer/docker-compose.yml")
+  a_plugins=$(anchor_val x-plugin-baseline "$dir/.devcontainer/docker-compose.yml")
 
   tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
   echo "fetching ${slug} (${tpath:-repo root}) ..."
@@ -274,14 +279,18 @@ if [ "${1:-}" = "sync" ]; then
       echo "  WARN: TEMPLATE_VARIANT names '$variant' but the template has no such variant"
     fi
   fi
-  if [ -n "$anchor" ]; then
-    cur=$(grep -m1 '^x-extra-allowed-domains:' "$dir/.devcontainer/docker-compose.yml" | sed 's/^x-extra-allowed-domains: *&extra_allowed_domains *//')
-    if [ "$cur" != "$anchor" ]; then
-      sed -i.bak "s|^x-extra-allowed-domains: &extra_allowed_domains .*|x-extra-allowed-domains: \&extra_allowed_domains $anchor|" \
-        "$dir/.devcontainer/docker-compose.yml" && rm -f "$dir/.devcontainer/docker-compose.yml.bak"
-      echo "  egress allowlist preserved: $anchor"
-    fi
-  fi
+  apply_anchor() {
+    key=$1; val=$2; f="$dir/.devcontainer/docker-compose.yml"
+    [ -n "$val" ] || return 0
+    al=$(printf '%s' "$key" | sed 's/^x-//;s/-/_/g')
+    grep -q "^$key:" "$f" || return 0
+    [ "$(anchor_val "$key" "$f")" = "$val" ] && return 0
+    sed -i.bak "s|^$key: &$al .*|$key: \\&$al $val|" "$f" && rm -f "$f.bak"
+    echo "  $key preserved: $val"
+  }
+  apply_anchor x-extra-allowed-domains "$a_domains"
+  apply_anchor x-plugin-marketplaces "$a_mkts"
+  apply_anchor x-plugin-baseline "$a_plugins"
 
   echo "template: ${old_ver} → ${new_ver}${variant:+  [$variant]}"
   if git -C "$dir" ls-files --error-unmatch .devcontainer >/dev/null 2>&1; then
