@@ -19,10 +19,102 @@ if [ -f "$VFILE" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
   t_up=$(curl -sf --max-time 4 -H "Authorization: Bearer $GITHUB_TOKEN" \
     -H "Accept: application/vnd.github.raw" \
     "https://api.github.com/repos/${t_slug}/contents/${t_path}.devcontainer/TEMPLATE_VERSION" 2>/dev/null | sed -n 1p)
-  if [ -n "$t_up" ] && [ "$t_up" != "$t_local" ]; then
+  # Ordered, not != : versions are zero-padded ISO dates (+letter), so string
+  # order IS version order. A repo AHEAD of the distribution point (template
+  # development, a PR branch) must stay silent — the old inequality check told
+  # exactly those repos to 'sandbox sync', which rolls the template BACK.
+  if [ -n "$t_up" ] && [[ "$t_up" > "$t_local" ]]; then
     echo "WARN: devcontainer template ${t_local} — upstream is ${t_up}. Run 'sandbox sync' on the host, review the diff, commit."
   fi
 fi
+
+# CRLF-worktree tripwire (Windows hosts): the host cloned with core.autocrlf=true,
+# so the bind-mounted files carry CRLF while the index holds LF — and git in here
+# converts nothing, so EVERY tracked file reads as modified and the agent can no
+# longer find its own diff (measured: 811 "changed", 796 pure line-ending noise).
+# Warn only, deliberately: setting core.autocrlf or renormalizing from inside the
+# container would rewrite the host developer's checkout through the bind mount.
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  # Index-LF vs worktree-CRLF, split by which harm applies, because the two halves
+  # of the repo-side fix land separately and the symptoms are not the same:
+  # Three states, because both the symptom and the cure differ between them:
+  #   noisy  — no text attribute at all. Git converts nothing, so it reports every
+  #            file as modified (measured on a real repo: 811 reported, 796 noise).
+  #   nopolicy — 'text=auto' but no 'eol=lf'. Git normalizes on read, so `git diff`
+  #            is clean; the CRLF bytes stay on disk and break shebangs. A plain
+  #            refresh is NOT enough here — under host core.autocrlf=true it just
+  #            re-checks them out as CRLF, so the eol=lf half has to land first.
+  #   stale  — eol=lf is in effect but the worktree was never refreshed. Same
+  #            broken-shebang symptom, and a refresh alone does fix it.
+  # Files git is TOLD to keep CRLF (attr eol=crlf, or stored CRLF in the index like
+  # sandbox.cmd) are intentional — never counted.
+  # Timeout-bounded: ls-files --eol reads every tracked file's content, ~8s on a
+  # large tree over a Windows bind mount, and this runs in postStartCommand.
+  # Split on TAB: git prints "i/x w/y attr/..." as one blob, then a tab, then the
+  # path — and the attr blob can hold several space-separated tokens, so matching
+  # on a whitespace-split field would only ever see its first token.
+  eol_counts=$(timeout -k 5 20 git ls-files --eol 2>/dev/null | awk -F'\t' '
+    $1 ~ /^i\/lf[[:space:]]/ && $1 ~ /w\/crlf/ && $1 !~ /eol=crlf/ {
+      if ($1 ~ /eol=lf/) stale++; else if ($1 ~ /text/) nopolicy++; else noisy++
+    }
+    END { printf "%d %d %d", noisy+0, nopolicy+0, stale+0 }') || true
+  # Parameter expansion, not `set --`: this script runs under `set -u`, where a
+  # short split would leave $2/$3 unbound and abort the whole boot check. awk's
+  # END always prints three integers; an empty value means the pipeline failed.
+  case $eol_counts in ''|*[!0-9\ ]*) eol_counts="0 0 0" ;; esac
+  noisy=${eol_counts%% *}; eol_rest=${eol_counts#* }
+  nopolicy=${eol_rest%% *}; stale=${eol_rest##* }
+  eol_fix="commit a root .gitattributes '* text=auto eol=lf', then refresh the worktree from a clean"
+  eol_fix2="tree ('git rm --cached -r . && git reset --hard'). See WINDOWS.md 'Line endings'."
+  if [ "${noisy:-0}" -gt 0 ]; then
+    echo "WARN: $noisy tracked files are CRLF in the worktree with no eol policy — in-container 'git diff'"
+    echo "      reports them ALL as modified, burying the real changes. Fix in the repo, from the host:"
+    echo "      $eol_fix"
+    echo "      $eol_fix2"
+  elif [ "${nopolicy:-0}" -gt 0 ]; then
+    echo "WARN: $nopolicy tracked files hold CRLF bytes under a 'text' attribute with no eol=lf — 'git diff'"
+    echo "      looks clean, but shebang scripts fail in here with 'bad interpreter: /bin/sh^M'. A refresh"
+    echo "      alone won't hold while the host has core.autocrlf=true. From the host: $eol_fix"
+    echo "      $eol_fix2"
+  elif [ "${stale:-0}" -gt 0 ]; then
+    echo "WARN: $stale tracked files still hold CRLF bytes though .gitattributes says eol=lf — 'git diff' looks"
+    echo "      clean, but shebang scripts fail in here with 'bad interpreter: /bin/sh^M'. Finish the fix on"
+    echo "      the host: 'git rm --cached -r . && git reset --hard'. See WINDOWS.md 'Line endings'."
+  fi
+fi
+
+# Supply-chain age gate: userland packages younger than 30 days are the
+# Shai-Hulud-class worm attack window — refuse them by default.
+# Keys: min-release-age (npm, DAYS as a bare number), minimum-release-age (pnpm,
+# MINUTES; npm warns unknown-key and proceeds), bunfig minimumReleaseAge (bun).
+# The npm value must not carry a unit suffix: npm >= 11.6 validates it as
+# "null | numeric value" and a "30d" both fails the gate AND breaks every npm
+# command with "Invalid time value" — verified on npm 11.17. Older npm (the
+# image currently ships 10.9.8) does not know the key at all and only warns, so
+# npm-side enforcement starts when a repo upgrades its own npm.
+# Toolchain itself is exempt by design — this gates project installs, not the image.
+# Both files on purpose: with NPM_CONFIG_USERCONFIG set (compose points it into
+# the per-machine volume) npm reads ONLY that file and ignores ~/.npmrc — while
+# pnpm's config chain still consults ~/.npmrc. Appending the missing keys to
+# both keeps the gate on whichever file a given tool resolves.
+for rc in "$HOME/.npmrc" ${NPM_CONFIG_USERCONFIG:+"$NPM_CONFIG_USERCONFIG"}; do
+  mkdir -p "$(dirname "$rc")" 2>/dev/null || true
+  for k in "min-release-age=30" "minimum-release-age=43200"; do
+    grep -qx "$k" "$rc" 2>/dev/null || echo "$k" >> "$rc"
+  done
+done
+if command -v bun >/dev/null 2>&1 && ! grep -q "minimumReleaseAge" "$HOME/.bunfig.toml" 2>/dev/null; then
+  # Never append a second [install]: TOML forbids redeclaring a table, and an
+  # unparseable bunfig breaks every later bun command. Add the key under the
+  # existing table when there is one, otherwise create the table.
+  if grep -q '^\[install\]' "$HOME/.bunfig.toml" 2>/dev/null; then
+    awk '{print} /^\[install\]/ && !d {print "minimumReleaseAge = \"30d\""; d=1}' \
+      "$HOME/.bunfig.toml" > "$HOME/.bunfig.toml.tmp" && mv "$HOME/.bunfig.toml.tmp" "$HOME/.bunfig.toml"
+  else
+    printf '[install]\nminimumReleaseAge = "30d"\n' >> "$HOME/.bunfig.toml"
+  fi
+fi
+echo "supply-chain: 30-day release-age gate configured (pnpm/bun enforce it; npm from 11.6)"
 
 # Plugin freshness — refresh-always: marketplace metadata + installed plugins
 # update BEFORE the session exists, so Claude's "restart required to apply" is
@@ -54,11 +146,43 @@ fi
 # First-run wizard skip: when Claude auth comes from the environment, seed the
 # onboarding flag on a fresh volume so interactive claude goes straight to the
 # prompt instead of forcing the login wizard (which ignores env tokens).
-if [ ! -f "$HOME/.claude/.claude.json" ] && \
-   { [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; }; then
-  mkdir -p "$HOME/.claude" && \
-    echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude/.claude.json" && \
-    echo "claude: onboarding pre-seeded (env auth — no first-run wizard)"
+# Merge, never create-if-absent: the plugin refresh above is itself a `claude`
+# invocation and already wrote .claude.json (firstStartTime, no onboarding key),
+# so an existence guard here is dead code on exactly the fresh machine it was
+# written for. Env-auth gate stays: on the IDE path there are no session secrets
+# and the wizard is wanted — it's how the user runs 'claude login' once.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+  mkdir -p "$HOME/.claude"
+  node -e '
+    const fs=require("fs"),f=process.env.HOME+"/.claude/.claude.json";
+    // Absent and unparseable must not collapse into the same branch: this file
+    // lives in the machine-wide agent-claude-config volume and holds the vendor
+    // login plus per-project trust. Rewriting it wholesale on a parse error
+    // would destroy that for EVERY repo on the machine, permanently. Missing =
+    // seed; corrupt = say so and touch nothing.
+    let raw=null;try{raw=fs.readFileSync(f,"utf8")}catch{}
+    let c={};
+    if(raw!==null){try{c=JSON.parse(raw)}catch{
+      console.log("WARN: ~/.claude/.claude.json is unparseable — leaving it alone; expect the first-run wizard");
+      process.exit(0)}}
+    if(c.hasCompletedOnboarding!==true){c.hasCompletedOnboarding=true;
+      // Write to a temp file and rename: rename is atomic, so a concurrent
+      // sandbox start on the same machine (this volume is shared) or a crash
+      // mid-write can never leave a half-written .claude.json behind. A
+      // truncating write in place can, and the vendor login lives here.
+      // Random suffix, not the pid: containers have their own PID namespaces, so
+      // two simultaneous starts can BOTH be pid 42 and interleave into one temp
+      // path — which would corrupt the very file this is protecting.
+      // Residual, accepted: two concurrent writers can still drop one unrelated
+      // edit (last rename wins). Claude rewrites this file itself constantly, so
+      // a lost key comes back; a truncated file would not.
+      // No apostrophes in here: this whole program is a single-quoted shell
+      // string, and one would terminate it.
+      const t=f+".tmp-"+require("crypto").randomBytes(6).toString("hex");
+      fs.writeFileSync(t,JSON.stringify(c,null,2)+"\n");
+      fs.renameSync(t,f);
+      console.log("claude: onboarding pre-seeded (env auth — no first-run wizard)")}
+  ' 2>/dev/null || true
 fi
 
 # In-box sessions default to auto mode — autonomy lives in the sandbox (host
@@ -175,9 +299,12 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
   # to one resource owner, can't write outside it, forced expiry. Classic PATs
   # (ghp_*) grant every repo the account can reach and never expire: a leaked
   # one is the account. OAuth app tokens (gho_*) are a person, not a bot.
+  # The counterweight: GitHub Packages accepts only classic/OAuth tokens, so
+  # on a repo with private npm/maven deps a fine-grained PAT E403s at install
+  # — neither shape wins on both axes; say the tradeoff out loud.
   case "$GITHUB_TOKEN" in
-    github_pat_*) echo "github: fine-grained PAT (org-scopable) — good" ;;
-    ghp_*)  echo "WARN: classic PAT detected — cannot be limited to the org; use a fine-grained PAT (resource owner: your org, selected repos, forced expiry)" ;;
+    github_pat_*) echo "github: fine-grained PAT (org-scopable) — good for git/API; NOTE: GitHub Packages rejects this shape — private npm/maven installs need a classic/OAuth token with read:packages" ;;
+    ghp_*)  echo "WARN: classic PAT detected — required for GitHub Packages but cannot be limited to the org; keep scopes minimal (read:packages + repo) with forced expiry" ;;
     gho_*)  echo "WARN: OAuth user token detected — this is a personal login, not a bot credential" ;;
     *)      echo "github: unrecognized token format — verify it is a fine-grained PAT or app installation token" ;;
   esac
@@ -213,6 +340,43 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
     } > "$gp.tmp" && mv "$gp.tmp" "$gp" && chmod 600 "$gp" \
       && echo "gradle: GitHub Packages credentials written to gradle.properties (volume) — IDE-launched builds resolve private deps"
   fi
+
+  # npm: same materialization contract. npm never reads GITHUB_TOKEN from the
+  # env — GitHub Packages needs an _authToken line in the npm userconfig, which
+  # compose points into the per-machine volume (NPM_CONFIG_USERCONFIG), so the
+  # credential a wrapper session writes here is what IDE-launched sessions and
+  # every `npm ci` read. Token as _authToken, no username (the registry ignores
+  # it for npm). Upsert, never append: rotation propagates. The scope→registry
+  # mapping (@yourorg:registry=https://npm.pkg.github.com) is REPO config —
+  # commit it in the repo's .npmrc; it holds no secret.
+  if [ -n "${NPM_CONFIG_USERCONFIG:-}" ] && mountpoint -q "$(dirname "$NPM_CONFIG_USERCONFIG")" 2>/dev/null; then
+    case "$GITHUB_TOKEN" in *[[:space:]]*) tok_ws=1 ;; *) tok_ws=0 ;; esac
+    if [ "$tok_ws" = 1 ]; then
+      # A token with embedded whitespace written verbatim would smuggle extra
+      # lines — i.e. arbitrary npm config directives — into the userconfig.
+      # Tokens never legitimately contain whitespace; refuse, don't sanitize.
+      # `case`, not grep: grep reads line-by-line, so the one character that
+      # matters most (an embedded newline) is a separator it never sees.
+      echo "WARN: GITHUB_TOKEN contains whitespace — npm credential NOT written (malformed secret; re-run 'sandbox init')"
+    else
+      nrc="$NPM_CONFIG_USERCONFIG"
+      # Random tmp suffix, not a fixed name or $$: this file sits in the shared
+      # machine volume and containers have their own PID namespaces, so two
+      # concurrent sandbox starts can both be pid 42 (same reasoning as the
+      # .claude.json seeder). Rename stays atomic within the volume.
+      ntmp="$nrc.tmp-$(head -c6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+      { [ -f "$nrc" ] && grep -v '^//npm\.pkg\.github\.com/:_authToken=' "$nrc" || true
+        echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}"
+      } > "$ntmp" && chmod 600 "$ntmp" && mv "$ntmp" "$nrc" \
+        && echo "npm: GitHub Packages credential written to npm userconfig (volume) — private-scope installs resolve on both launch paths"
+    fi
+  else
+    # The guard holds today; this line exists so a future regression (override
+    # unsetting the var, base image dropping `mountpoint`, volume not mounted)
+    # surfaces here instead of as an unexplained E401 mid-`npm ci` — same
+    # contract as the plugins NOT-added message below.
+    echo "WARN: npm credential NOT written — NPM_CONFIG_USERCONFIG unset or not on a mounted volume; private-scope 'npm ci' will fail with E401"
+  fi
 fi
 
 # Org plugin provisioning — marketplaces and baseline plugins live in the
@@ -242,6 +406,110 @@ if command -v claude >/dev/null 2>&1; then
       || echo "plugins: '$p' NOT installed — is its marketplace available (see above)?"
   done
   unset IFS
+fi
+
+# ── memspec wiring (optional agent memory) ─────────────────────────────────
+# A repo opts in by committing a .memspec.yaml pointer. Two boot-time actions,
+# both gated on the pointer + engine, both non-blocking (set -e is off; exit
+# codes swallowed so a memory hiccup never fails boot or CI).
+if [ -f "$PWD/.memspec.yaml" ]; then
+  if command -v memspec >/dev/null 2>&1; then
+    # SessionStart hook — inject memory at session start so agents never have to
+    # remember to search. Written to PROJECT-scope .claude/settings.local.json
+    # (per-checkout, gitignored) via the same idempotent settings-reconcile
+    # idiom this script already uses for statusLine (~/.claude/settings.json) —
+    # the native Claude Code `hooks` key, not a bespoke runner. `memspec
+    # context` emits a token-budgeted memory digest to stdout, which Claude Code
+    # feeds into the session. Set once (deduped by command); safe to re-run.
+    node -e '
+      const fs=require("fs"),path=require("path");
+      const dir=path.join(process.cwd(),".claude"),f=path.join(dir,"settings.local.json");
+      // Absent and unparseable must not collapse into the same branch: a
+      // corrupt file rewritten as {} would destroy every unrelated setting in
+      // it. Missing = start fresh; corrupt = WARN and touch nothing.
+      let raw=null;try{raw=fs.readFileSync(f,"utf8")}catch{}
+      let s={};
+      if(raw!==null){try{s=JSON.parse(raw)}catch{
+        console.log("WARN: .claude/settings.local.json is unparseable — memspec SessionStart hook NOT written and the file left untouched; fix the JSON by hand");
+        process.exit(0)}}
+      const CMD="memspec context";
+      s.hooks=s.hooks||{};
+      const list=Array.isArray(s.hooks.SessionStart)?s.hooks.SessionStart:[];
+      const has=list.some(g=>g&&Array.isArray(g.hooks)&&g.hooks.some(h=>h&&h.command===CMD));
+      if(has)process.exit(0);
+      list.push({hooks:[{type:"command",command:CMD}]});
+      s.hooks.SessionStart=list;
+      fs.mkdirSync(dir,{recursive:true});
+      const t=f+".tmp-"+require("crypto").randomBytes(6).toString("hex");
+      fs.writeFileSync(t,JSON.stringify(s,null,2)+"\n");fs.renameSync(t,f);
+      console.log("memspec: SessionStart hook (memspec context) wired via .claude/settings.local.json");
+    ' 2>/dev/null || echo "note: memspec SessionStart hook not wired (settings.local.json write failed) — add a SessionStart hook running 'memspec context' by hand"
+    # Scratch hygiene nag — boot is the calendar (there is no scheduled sweep).
+    # Stale-flagged claims surface as a one-line nag; removal stays operator-run
+    # (memspec sweep is interactive, the only path that deletes memories).
+    if [ -d "$HOME/.memspec/memory" ]; then
+      stale_ct="$(cd "$HOME/.memspec" && timeout -k 5 20 memspec sweep --dry-run 2>/dev/null | grep -c 'ms_')" || stale_ct=0
+      if [ "${stale_ct:-0}" -gt 0 ]; then
+        echo "note: $stale_ct stale-flagged scratch claim(s) — run 'memspec sweep' (interactive) to retire them"
+      fi
+    fi
+  else
+    # engine absent — the pinned postCreate install (setup-memspec.sh) did not
+    # run or failed. Single-line note; never blocks.
+    echo "note: .memspec.yaml present but 'memspec' CLI not found — memory session injection skipped (expected: pinned install at postCreate)"
+  fi
+elif [ -f "$PWD/.claude/settings.local.json" ] && command -v node >/dev/null 2>&1; then
+  # Pointer removed (or never present) but a previous boot may have persisted
+  # the SessionStart hook — reconcile it away. Same idempotent node idiom as
+  # the writer: only OUR exact "memspec context" command entry is removed;
+  # unparseable JSON is left untouched (nothing of ours can be reliably found
+  # in it, and rewriting would clobber unrelated settings).
+  node -e '
+    const fs=require("fs"),path=require("path");
+    const f=path.join(process.cwd(),".claude","settings.local.json");
+    let raw=null;try{raw=fs.readFileSync(f,"utf8")}catch{process.exit(0)}
+    let s;try{s=JSON.parse(raw)}catch{process.exit(0)}
+    const CMD="memspec context";
+    if(!s||!s.hooks||!Array.isArray(s.hooks.SessionStart))process.exit(0);
+    let changed=false;
+    const kept=[];
+    for(const g of s.hooks.SessionStart){
+      if(g&&Array.isArray(g.hooks)){
+        const hs=g.hooks.filter(h=>!(h&&h.type==="command"&&h.command===CMD));
+        if(hs.length!==g.hooks.length){
+          changed=true;
+          if(hs.length>0){g.hooks=hs;kept.push(g)}
+          continue;
+        }
+      }
+      kept.push(g);
+    }
+    if(!changed)process.exit(0);
+    if(kept.length>0)s.hooks.SessionStart=kept;else delete s.hooks.SessionStart;
+    if(Object.keys(s.hooks).length===0)delete s.hooks;
+    const t=f+".tmp-"+require("crypto").randomBytes(6).toString("hex");
+    fs.writeFileSync(t,JSON.stringify(s,null,2)+"\n");fs.renameSync(t,f);
+    console.log("memspec: stale SessionStart hook (memspec context) removed from .claude/settings.local.json (no .memspec.yaml pointer)");
+  ' 2>/dev/null || true
+fi
+# ── end memspec wiring ─────────────────────────────────────────────────────
+
+# Ignore hygiene: this boot may write .claude/settings.local.json (the memspec
+# hook) and relies on the Claude Code convention that it is gitignored — but
+# nothing guarantees the repo actually ignores it, and a committed copy leaks
+# machine-local wiring. Enforce LOCALLY via .git/info/exclude (worktree-aware
+# via --git-path); never touch the repo's .gitignore — that file is the team's,
+# not the template's.
+if [ -f "$PWD/.claude/settings.local.json" ] \
+   && command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+   && ! git check-ignore -q .claude/settings.local.json 2>/dev/null; then
+  excl="$(git rev-parse --git-path info/exclude 2>/dev/null)"
+  if [ -n "$excl" ]; then
+    mkdir -p "$(dirname "$excl")" 2>/dev/null || true
+    echo ".claude/settings.local.json" >> "$excl" 2>/dev/null \
+      && echo "git: .claude/settings.local.json added to .git/info/exclude (local-only ignore)" \
+      || echo "WARN: .claude/settings.local.json is NOT gitignored and .git/info/exclude could not be written — add it to .gitignore to avoid committing machine-local settings"
+  fi
 fi
 
 if [ -z "${ATLASSIAN_AGENT_TOKEN:-}" ]; then

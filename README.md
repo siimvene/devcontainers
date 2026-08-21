@@ -73,14 +73,17 @@ substitute for keeping those tokens scoped.
 | Piece                                      | Job                                                                                                                      |
 |--------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
 | `.devcontainer/devcontainer.json`          | Base profile: Claude Code installed, auth persisted across rebuilds, host env-file wiring, workload wired to the gateway |
-| `.devcontainer/docker-compose.yml`         | Two containers + networks: workload (internal-only, no egress) and gateway (allowlist proxy); the host-enforced boundary |
+| `.devcontainer/docker-compose.yml`         | Two containers + networks: workload (internal-only, no egress) and gateway (allowlist proxy); carries the repo-owned anchors (egress allowlist, plugin provisioning) |
+| `.devcontainer/docker-compose.override.yml`| Repo-owned local-patch slot (extra sidecar, a mount, a fix awaited upstream); ships empty, preserved by `sandbox sync`   |
 | `.devcontainer/gateway/`                   | The egress gateway image (tinyproxy, built from a trusted base); renders the allowlist from `EXTRA_ALLOWED_DOMAINS`      |
 | `.devcontainer/check-agent-env.sh`         | Boot check: egress containment self-test, LLM auth preflight, prints which identity the agent will read                  |
 | `.devcontainer/setup-cross-vendor.sh`      | Opt-in second vendor: installs Codex CLI only when the repo's egress allowlist names an OpenAI domain                     |
+| `.devcontainer/setup-memspec.sh`           | Opt-in agent memory: installs the pinned memspec engine + a disposable scratch store (only wired when a repo commits `.memspec.yaml`) |
 | `.devcontainer/mcp/with-atlassian.mcp.json`| Opt-in variant: read-only Jira/Confluence via a scoped service token                                                     |
+| `.devcontainer/mcp/with-memspec.mcp.json`  | Opt-in variant: the memspec memory MCP (search/remember/reconcile) for repos that opt into memspec                       |
 | `.devcontainer/variants/java/`             | Java/Gradle: JDK 21, build-registry allowlist + JVM proxy, shared gradle cache volume, internal-only  sidecars (DB etc.) |
 | `agent.env.example`                        | The host-side env file shape (`~/.agent/agent.env` — never inside the repo)                                              |
-| `sandbox`                                  | One-word entry point: container up + boot check + Claude, feels like `claude`                                            |
+| `sandbox` / `sandbox.cmd`                  | One-word entry point: container up + boot check + Claude, feels like `claude`; the `.cmd` relay makes it work from PowerShell/cmd too |
 
 ## Design decisions (why it looks like this)
 
@@ -101,6 +104,14 @@ substitute for keeping those tokens scoped.
   in a reviewable diff.
 - **Auth survives rebuilds.** A named volume persists `~/.claude`, so Claude login and
   MCP OAuth don't need re-wrangling every rebuild.
+- **Org plugins are provisioned, not hoped for.** Marketplaces and installed plugins
+  live in the per-machine volume, so a fresh machine has neither — the HUD statusline
+  stays silently empty and org skills are absent. The compose anchors
+  `x-plugin-marketplaces` / `x-plugin-baseline` declare the baseline (marketplace
+  slugs and `plugin@marketplace` ids); the boot check adds whatever is missing,
+  idempotently. They ship empty here — set them to your org's marketplace to opt in.
+  Private marketplace clones need `GITHUB_TOKEN`, so an IDE-launched session defers
+  provisioning to the first `sandbox` run — the volume keeps the result.
 - **The lazy path is the narrow path.** Variant env names only fit scoped tokens
   (`ATLASSIAN_AGENT_RO_TOKEN`); the boot check calls the API and refuses to proceed if
   the identity doesn't look like a service account.
@@ -110,11 +121,20 @@ substitute for keeping those tokens scoped.
 macOS and Linux are first-class (Linux: native docker + the 1Password Linux app;
 managed settings at `/etc/claude-code/managed-settings.json`). **Windows:
 native Git Bash is the supported path** — the `sandbox` wrapper and the
-template are field-tested under MINGW64 (Git for Windows) with Docker Desktop;
-no tools beyond what Git Bash ships are required. WSL2 works too and is just
-the Linux flow inside WSL. No PowerShell/cmd port. Native-Windows caveat:
-verify the managed-settings enforcement path for that host separately — the
-host-tier autonomy lockout is documented for macOS/Linux paths only.
+template are field-tested under MINGW64 (Git for Windows) with Docker Desktop,
+per [WINDOWS.md](WINDOWS.md), which also covers the two things that bite there
+and nowhere else: the consuming repo's CRLF worktree, and needing a template new
+enough that "Reopen in Container" works at all. WSL2 works too and is just
+the Linux flow inside WSL. The `sandbox.cmd` relay lets `sandbox` run from
+PowerShell/cmd, but it just hands off to Git Bash — Git Bash is still required.
+Native-Windows caveat: verify the managed-settings enforcement path for that
+host separately — the host-tier autonomy lockout is documented for macOS/Linux
+paths only.
+
+Prerequisite for **both** launch paths: `node` on the *host* PATH. `initializeCommand`
+runs `.devcontainer/write-env.cjs` on the host, before any container exists, to hand
+compose the repo name — and it has no shell fallback. An IDE's own bundled node doesn't
+count; it isn't on PATH.
 
 ## Setup (once per developer)
 
@@ -137,12 +157,18 @@ whatever `KEY=value` lines your manager prints, same session-scoped delivery.
 ```bash
 sandbox                    # interactive Claude inside the repo's container
 sandbox -p "close TICKET-123: implement, test, open the PR"   # headless dispatch
+sandbox sync               # pull the latest template, review the git diff, commit
+sandbox rebuild            # recreate the container so synced changes actually apply
 ```
 
 `sandbox` brings the container up (seconds when cached), prints the boot check —
 which identities Jira/GitHub calls run as, whether vendor auth is alive, the egress
 containment self-test — and drops you into Claude. Same repo checkout as the host
 (bind mount), so nothing to sync.
+
+`sandbox sync` preserves the repo-owned compose anchors (egress allowlist, plugin
+provisioning) and the `docker-compose.override.yml` local-patch slot across template
+updates, and tells you whether a `rebuild` is needed to apply what changed.
 
 ## Reaching a dev server from your machine
 
@@ -212,30 +238,72 @@ the base profile. To enable:
 2. Seed auth once from an **attended** session inside the container: `codex login`
    (browser flow). It persists in the `agent-codex-config` volume across rebuilds,
    same contract as Claude auth.
-3. Install the tooling plugins per repo, not per user — commit them in the repo's
-   `.claude/settings.json` so every dev (and every sandbox) gets them on first
-   session, no manual `/plugin` commands:
+3. Install the tooling plugins per repo, not per user — extend the repo-owned
+   plugin anchors in `.devcontainer/docker-compose.yml` so the boot check
+   provisions them on every machine, no manual `/plugin` commands:
 
-   ```json
-   {
-     "extraKnownMarketplaces": {
-       "org-skills": {
-         "source": { "source": "github", "repo": "yourorg/ai-plugins" }
-       }
-     },
-     "enabledPlugins": { "your-plugin@org-skills": true }
-   }
+   ```yaml
+   x-plugin-marketplaces: &plugin_marketplaces "yourorg/ai-plugins"
+   x-plugin-baseline: &plugin_baseline "your-plugin@org-skills,another@org-skills"
    ```
 
-   Claude asks once per repo to trust the declared marketplace, then installs.
+   The boot check adds what's declared and missing (idempotent; the result
+   persists in the per-machine volume, and `sandbox sync` preserves both anchors).
    Fetching a private marketplace repo from inside the container needs a
    read-only `GITHUB_TOKEN` in `~/.agent/agent.env` (contents: read on
    that one repo — scoped, not your personal all-repo PAT). In the
-   marketplace repo itself, use `{"source": "directory", "path": "."}` instead —
-   the sandbox then serves the plugins from the working tree you're editing.
+   marketplace repo itself, add the working tree as a directory-source
+   marketplace instead (`claude plugin marketplace add .`) — the sandbox then
+   serves the plugins from the tree you're editing.
 
 The boot check reports Codex install/auth state on every start, next to the identity
 line, so an unattended run never discovers a missing second vendor mid-task.
+
+## Node repos — private npm packages, `node_modules`
+
+Two mechanisms make `npm ci` → build → test work in the box on a real monorepo with
+private `@yourorg/*` packages:
+
+- **`node_modules` is a per-repo named volume** (`sandbox-node-modules-<repo>-<hash>`,
+  where the 8-char hash of the full checkout path keeps two same-named repos apart),
+  not the host's tree. Native binaries are per-platform — the host holds
+  win32/darwin esbuild and rollup builds, the container needs linux ones — so a
+  tree shared through the bind mount is broken on one side or the other. Worse,
+  a container `npm ci` clears `node_modules` *before* failing auth, which used
+  to destroy the HOST's install through the mount. Each side now owns its
+  install: run `npm ci` once in the box on first use; the volume persists
+  across rebuilds.
+- **The GitHub Packages credential is materialized, not env-read.** npm never
+  consumes `GITHUB_TOKEN` from the environment — it needs an `_authToken` line
+  in its userconfig, which compose points into the per-machine `agent-npm-config`
+  volume. The boot check upserts `//npm.pkg.github.com/:_authToken=…` whenever a
+  wrapper session carries the token, so IDE-launched sessions and every later
+  `npm ci` read the same file (same at-rest contract as the gradle variant's
+  `gradle.properties`). Machine-scoped on purpose: every wrapper-launched
+  sandbox on the machine already receives the same `GITHUB_TOKEN` through
+  `remoteEnv` (there is one `~/.agent/agent.env` per machine), so the shared
+  volume adds no audience the env didn't already have. Scope note: GitHub
+  Packages accepts only classic/OAuth tokens (a fine-grained PAT authenticates
+  to the API but E403s at the registry — `sandbox init` now preflights this),
+  so keep the token minimal the classic way: `read:packages` (+ `repo` for git
+  delegation), forced expiry. Note that
+  `sandbox init` keeps an already-stored token rather than re-capturing: after
+  rotating or re-scoping (e.g. `gh auth refresh -s read:packages`), clear the
+  stored `github-token` and rerun `sandbox init` so the new value propagates —
+  the boot check's upsert then rewrites the userconfig on the next wrapper
+  launch. The scope→registry mapping
+  (`@yourorg:registry=https://npm.pkg.github.com`) is repo config, not a secret —
+  commit it in the repo's `.npmrc`. Without it npm never reaches the private
+  registry and reports a misleading 404 from the public one instead of a clean 401.
+
+Known limits, both served by the override slot: only the repo-root
+`node_modules` is shadowed — a workspace layout that installs nested trees
+(`packages/ui/node_modules`) or a java-variant monorepo with frontend modules
+keeps those paths on the host bind mount, so declare additional volumes for
+them in `docker-compose.override.yml` per repo. And the override keep-list
+needs the `sandbox` wrapper from `2026-08-12a` or newer on the machine — an
+older installed wrapper's sync flattens a repo's override back to the empty
+stub (visible in the post-sync `git diff`, but update the wrapper).
 
 ## Java / compose-sidecar variant
 
@@ -260,7 +328,8 @@ build-registry allowlist) — the boot guard names this exact mistake. What chan
   jitpack and GitHub Packages. Extend the `x-extra-allowed-domains` anchor to match the
   repo's `repositories {}` blocks — the gateway denying a resolve is the signal you
   missed one. GitHub Packages also needs `GITHUB_USER` + a packages-scoped
-  `GITHUB_TOKEN` in `~/.agent/agent.env`.
+  `GITHUB_TOKEN` in `~/.agent/agent.env` (`sandbox init` writes `GITHUB_USER`
+  automatically after validating the token).
 - **JVM proxy wiring.** The JVM ignores `HTTPS_PROXY` env, so `JAVA_TOOL_OPTIONS` sets
   `-Dhttps.proxyHost=gateway` (and `http`, and `nonProxyHosts` for `db`/loopback).
   Without it Gradle's wrapper download and dependency resolution fail closed.
@@ -273,8 +342,9 @@ build-registry allowlist) — the boot guard names this exact mistake. What chan
   `sandbox` wrapper — resolve private dependencies too. Both engineer workflows are
   first-class: agent-CLI sessions get the token per session, IDE sessions read the
   materialized file. This puts the token at rest in a machine-local volume — the
-  same class as the vendor logins in `agent-claude-config` — so use a fine-grained
-  PAT (`packages: read`, forced expiry), which the boot check already pushes toward.
+  same class as the vendor logins in `agent-claude-config` — so keep it minimal:
+  GitHub Packages accepts only classic/OAuth tokens (fine-grained PATs E403 at
+  the registry), which means `read:packages` scope and forced expiry.
 - **Sidecars instead of testcontainers.** Docker-in-docker stays out of scope; the
   compose file declares integration-test services (postgres ships as the example) as
   siblings on the same `internal` network — **no egress** of their own, so a superuser

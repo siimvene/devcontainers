@@ -1,0 +1,9 @@
+# Repo-local compose patches. `sandbox sync` replaces docker-compose.yml
+# wholesale from the template source but KEEPS this file — put anything the
+# repo needs to hold locally (an extra sidecar, a mount, an env var, a fix
+# you're waiting on upstream) here instead of editing docker-compose.yml.
+# Standard compose merge semantics: maps merge, scalars here win.
+#
+# This stub must exist even when empty: devcontainer.json lists it in
+# dockerComposeFile, and compose errors on a missing file.
+services: {}

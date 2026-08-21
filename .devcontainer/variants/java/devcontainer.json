@@ -6,7 +6,9 @@
   // devcontainer.json AND the base docker-compose.yml — this file with the base
   // compose fails at postCreate (no gradle volume, no JVM proxy wiring, empty
   // build allowlist). The gateway/ dir must be present alongside.
-  "dockerComposeFile": "docker-compose.yml",
+  // Override file = the repo's local-patch slot, preserved by `sandbox sync`
+  // (same contract as the base template; the stub ships alongside).
+  "dockerComposeFile": ["docker-compose.yml", "docker-compose.override.yml"],
   "service": "workload",
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   // Per-repo mount path: folder trust, project settings, and history key on the
@@ -14,11 +16,20 @@
   // every sandboxed repo on the machine. Compose can't substitute devcontainer
   // variables, so initializeCommand (host-side, cwd = the workspace folder)
   // writes .devcontainer/.env for compose interpolation of ${SANDBOX_REPO}.
-  // Gitignored; rewritten every up. node first (the one runner both cmd.exe and
-  // sh can call — Windows hosts have it per WINDOWS.md); POSIX printf fallback
-  // for Unix hosts without node on PATH (VS Code Remote-SSH runs the CLI on its
-  // own BUNDLED node at a private path — nothing guarantees a system node).
-  "initializeCommand": "node -e \"require('fs').writeFileSync(require('path').join('.devcontainer','.env'),'SANDBOX_REPO='+require('path').basename(process.cwd())+'\\n')\" || printf 'SANDBOX_REPO=%s\\n' \"$(basename \"$PWD\")\" > .devcontainer/.env",
+  // Gitignored; rewritten every up. Array form is load-bearing: it spawns the
+  // process directly, with no host shell in the middle. A string command goes
+  // through `cmd.exe /c` (without /s) on Windows, whose first/last quote
+  // stripping mangles a quoted script and leaves .env unwritten — compose then
+  // defaults the mount path and every exec dies with "chdir to cwd failed".
+  // Consequence: node on the host PATH is a hard requirement (already a
+  // documented Windows prerequisite per WINDOWS.md); a missing node now fails
+  // loudly here instead of silently mounting the repo at the wrong path.
+  // .cjs so a `"type": "module"` consuming repo can't turn it into ESM and break
+  // its `require` — see the header comment in the script.
+  // Keep in lockstep with the base devcontainer.json: `sandbox sync` copies this
+  // file OVER the base one whenever TEMPLATE_VARIANT names this variant, so a
+  // fix that lands only in the base never reaches a java repo.
+  "initializeCommand": ["node", ".devcontainer/write-env.cjs"],
 
   // Credentials arrive per-session via remoteEnv (injected at exec time, never
   // stored in the container config — nothing in `docker inspect`).
@@ -64,7 +75,13 @@
 
   // Same contract as the base template, plus the gradle cache volume chown.
   // No init-firewall: egress is enforced by the gateway, not in-container.
-  "postCreateCommand": "mountpoint -q /home/node/.gradle || { echo 'ERROR: gradle-cache volume not mounted — you are running the java variant devcontainer.json against the BASE docker-compose.yml. Copy variants/java/docker-compose.yml over .devcontainer/docker-compose.yml and rebuild.'; exit 1; }; sudo chown node:node /home/node/.claude /home/node/.codex /home/node/.gradle /commandhistory && bash .devcontainer/setup-cross-vendor.sh && bash .devcontainer/variants/java/configure-gradle-toolchains.sh",
+  // safe.directory: on Windows hosts the bind-mounted workspace arrives owned
+  // 0:0 while we run as node (uid 1000), so every git command aborts on
+  // "dubious ownership". "$PWD" rather than a substituted
+  // ${containerWorkspaceFolder}, which the shell would re-parse: a directory
+  // named `repo$(...)` or holding a space would command-substitute or split and
+  // break the && chain. Lifecycle commands already run from the workspace folder.
+  "postCreateCommand": "mountpoint -q /home/node/.gradle || { echo 'ERROR: gradle-cache volume not mounted — you are running the java variant devcontainer.json against the BASE docker-compose.yml. Copy variants/java/docker-compose.yml over .devcontainer/docker-compose.yml and rebuild.'; exit 1; }; sudo chown node:node /home/node/.claude /home/node/.codex /home/node/.gradle /home/node/.npm-config /commandhistory && git config --global --add safe.directory \"$PWD\" && bash .devcontainer/setup-cross-vendor.sh && bash .devcontainer/setup-memspec.sh && bash .devcontainer/variants/java/configure-gradle-toolchains.sh",
   "postStartCommand": "bash .devcontainer/check-agent-env.sh",
 
   "customizations": {

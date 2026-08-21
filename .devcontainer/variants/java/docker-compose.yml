@@ -8,8 +8,8 @@
 # Egress allowlist additions: the Java build plane (Maven Central, Gradle
 # portals, Spring, jitpack, Mulesoft, GitHub Packages, nodejs.org for
 # gradle-node-plugin frontends) on top of the base set — the reference shape
-# is a Spring/Gradle monorepo with an embedded webpack frontend module (the
-# ticketing monorepo shape). Extend further to match the repo's build.gradle
+# is a Spring/Gradle monorepo with an embedded webpack frontend module.
+# Extend further to match the repo's build.gradle
 # repositories{}. jcenter.bintray.com is included even though the service
 # itself was decommissioned in 2021 — some legacy build.gradle files still
 # declare it as a repository (never actually resolved from) and Gradle errors
@@ -56,6 +56,11 @@ services:
       # updates arrive via rebuild, not via the CLI mutating itself in-place.
       # Also silences "Auto-update failed: no write permission to npm prefix".
       DISABLE_AUTOUPDATER: "1"
+      # npm user config in the per-machine volume — same contract as the base
+      # template (boot check materializes the GitHub Packages credential there;
+      # IDE-launched sessions read the same file). The gradle-node-plugin
+      # frontends resolve private npm deps through it too.
+      NPM_CONFIG_USERCONFIG: /home/node/.npm-config/npmrc
     networks:
       - internal
     volumes:
@@ -64,6 +69,7 @@ services:
       - codex-config:/home/node/.codex
       - bash-history:/commandhistory
       - gradle-cache:/home/node/.gradle
+      - npm-config:/home/node/.npm-config
     depends_on:
       - gateway
 
@@ -101,11 +107,21 @@ networks:
 volumes:
   # Fixed names = shared per machine (one login per vendor per machine, gradle
   # cache reused across repos). Compose would otherwise prefix with the project.
+  # `external: true` because they hold machine-wide state: a `compose down -v`
+  # in ONE repo must not delete every repo's logins/caches. write-env.cjs
+  # pre-creates them idempotently on every up.
   claude-config:
     name: agent-claude-config
+    external: true
   codex-config:
     name: agent-codex-config
+    external: true
   bash-history:
     name: agent-bash-history
+    external: true
   gradle-cache:
     name: agent-gradle-cache
+    external: true
+  npm-config:
+    name: agent-npm-config
+    external: true

@@ -1,0 +1,8 @@
+{
+  "$comment": "Optional agent memory MCP. RECOMMENDED for every repo that opts into memspec (a committed .memspec.yaml pointer): merge mcpServers.memspec into the repo's .mcp.json so agents get the memspec MCP tools (memspec_search, memspec_get, memspec_remember, memspec_supersede, memspec_verify, memspec_anchor, memspec_reconcile, memspec_observe, memspec_relate, memspec_status, memspec_export — session-start context injection is the boot hook's job, not an MCP tool). The engine is installed at postCreate (setup-memspec.sh, pinned); memspec-mcp launches in-process with cwd = the workspace root, where it reads .memspec.yaml and the writable ~/.memspec scratch layer.",
+  "mcpServers": {
+    "memspec": {
+      "command": "memspec-mcp"
+    }
+  }
+}

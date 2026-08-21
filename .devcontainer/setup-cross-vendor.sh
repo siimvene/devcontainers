@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Opt-in cross-vendor tooling (Codex CLI for consort-style Claude+Codex repos).
+# Opt-in cross-vendor tooling (Codex CLI for cross-vendor Claude+Codex repos).
 # Gated on the egress decision: if the repo's EXTRA_ALLOWED_DOMAINS doesn't name
 # an OpenAI domain, the second vendor was not chosen — install nothing.
 # npm reaches registry.npmjs.org through the gateway (allowlisted in the base

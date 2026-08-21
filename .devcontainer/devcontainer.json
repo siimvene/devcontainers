@@ -3,7 +3,12 @@
   // Compose-based: the workload plus its egress gateway start together. The
   // workload has no direct internet route; the gateway is an allowlist proxy
   // it cannot reconfigure. See README "Security model".
-  "dockerComposeFile": "docker-compose.yml",
+  // The override file is the repo's local-patch slot: `sandbox sync` replaces
+  // docker-compose.yml wholesale but keeps the override, so a repo can hold a
+  // local fix (extra sidecar, a mount) while waiting for it upstream. The
+  // template ships it as an empty stub — compose errors on a listed-but-missing
+  // file, so it must always exist.
+  "dockerComposeFile": ["docker-compose.yml", "docker-compose.override.yml"],
   "service": "workload",
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   // Per-repo mount path: folder trust, project settings, and history key on the
@@ -11,11 +16,17 @@
   // every sandboxed repo on the machine. Compose can't substitute devcontainer
   // variables, so initializeCommand (host-side, cwd = the workspace folder)
   // writes .devcontainer/.env for compose interpolation of ${SANDBOX_REPO}.
-  // Gitignored; rewritten every up. node first (the one runner both cmd.exe and
-  // sh can call — Windows hosts have it per WINDOWS.md); POSIX printf fallback
-  // for Unix hosts without node on PATH (VS Code Remote-SSH runs the CLI on its
-  // own BUNDLED node at a private path — nothing guarantees a system node).
-  "initializeCommand": "node -e \"require('fs').writeFileSync(require('path').join('.devcontainer','.env'),'SANDBOX_REPO='+require('path').basename(process.cwd())+'\\n')\" || printf 'SANDBOX_REPO=%s\\n' \"$(basename \"$PWD\")\" > .devcontainer/.env",
+  // Gitignored; rewritten every up. Array form is load-bearing: it spawns the
+  // process directly, with no host shell in the middle. A string command goes
+  // through `cmd.exe /c` (without /s) on Windows, whose first/last quote
+  // stripping mangles a quoted script and leaves .env unwritten — compose then
+  // defaults the mount path and every exec dies with "chdir to cwd failed".
+  // Consequence: node on the host PATH is a hard requirement (already a
+  // documented Windows prerequisite per WINDOWS.md); a missing node now fails
+  // loudly here instead of silently mounting the repo at the wrong path.
+  // .cjs so a `"type": "module"` consuming repo can't turn it into ESM and break
+  // its `require` — see the header comment in the script.
+  "initializeCommand": ["node", ".devcontainer/write-env.cjs"],
 
   // Credentials arrive per-session from the launching process env (the `sandbox`
   // wrapper resolves ~/.agent/agent.env). remoteEnv is injected at exec time and
@@ -45,9 +56,18 @@
   "remoteUser": "node",
 
   // chown: docker creates the named volumes root-owned; without it Claude/Codex
-  // can't write auth state and persistence silently fails. Then opt-in
-  // cross-vendor tooling (installed via the gateway-allowlisted npm registry).
-  "postCreateCommand": "sudo chown node:node /home/node/.claude /home/node/.codex /commandhistory && bash .devcontainer/setup-cross-vendor.sh",
+  // can't write auth state and persistence silently fails. safe.directory: on
+  // Windows hosts the bind-mounted workspace arrives owned 0:0 while we run as
+  // node (uid 1000), so every git command aborts on "dubious ownership" — this
+  // runs as remoteUser, so the exception lands in /home/node/.gitconfig and
+  // correctly dies with the container. "$PWD" rather than the substituted
+  // ${containerWorkspaceFolder}: lifecycle commands already run from the
+  // workspace folder (the relative setup-cross-vendor.sh path below relies on
+  // it), and a textually substituted path would be re-parsed by the shell — a
+  // directory named `repo$(...)` or holding a space would command-substitute or
+  // split, breaking the && chain. Then opt-in cross-vendor tooling (installed
+  // via the gateway-allowlisted npm registry) and the optional memory engine.
+  "postCreateCommand": "sudo chown node:node /home/node/.claude /home/node/.codex /home/node/.npm-config /commandhistory \"$PWD/node_modules\" && git config --global --add safe.directory \"$PWD\" && bash .devcontainer/setup-cross-vendor.sh && bash .devcontainer/setup-memspec.sh",
   "postStartCommand": "bash .devcontainer/check-agent-env.sh",
 
   "customizations": {

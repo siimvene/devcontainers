@@ -53,6 +53,12 @@ services:
       # updates arrive via rebuild, not via the CLI mutating itself in-place.
       # Also silences "Auto-update failed: no write permission to npm prefix".
       DISABLE_AUTOUPDATER: "1"
+      # npm user config lives in the per-machine volume, not the container layer:
+      # the boot check materializes the GitHub Packages credential there once a
+      # wrapper session carries GITHUB_TOKEN, and IDE-launched sessions (which
+      # resolve no secrets) read the same file. Named volumes hold directories,
+      # not files, hence the subdir + this pointer.
+      NPM_CONFIG_USERCONFIG: /home/node/.npm-config/npmrc
     # No cap_add: the workload needs zero network privileges. Egress control
     # lives in the gateway, not here.
     networks:
@@ -61,7 +67,15 @@ services:
       - ..:/workspaces/${SANDBOX_REPO:-app}:cached
       - claude-config:/home/node/.claude
       - codex-config:/home/node/.codex
+      # node_modules is a per-repo named volume shadowing the bind mount: native
+      # binaries are per-platform, so a tree shared with a Windows/macOS host is
+      # wrong on one side or the other (host esbuild/rollup binaries vs the
+      # container's linux builds) — and a container `npm ci` would otherwise
+      # delete the HOST's tree through the bind mount before failing auth.
+      # Each side installs its own; the volume persists across rebuilds.
+      - node-modules:/workspaces/${SANDBOX_REPO:-app}/node_modules
       - bash-history:/commandhistory
+      - npm-config:/home/node/.npm-config
     depends_on:
       - gateway
 
@@ -98,10 +112,26 @@ networks:
 
 volumes:
   # Fixed names = shared per machine (one login per vendor per machine).
-  # Compose would otherwise prefix with the project.
+  # Compose would otherwise prefix with the project. `external: true` because
+  # they hold machine-wide state (vendor logins, npm credential): compose must
+  # never consider them project-owned, so a `compose down -v` in ONE repo
+  # cannot delete every repo's logins. initializeCommand (write-env.cjs)
+  # pre-creates them idempotently, so a fresh machine still comes up.
   claude-config:
     name: agent-claude-config
+    external: true
   codex-config:
     name: agent-codex-config
+    external: true
   bash-history:
     name: agent-bash-history
+    external: true
+  npm-config:
+    name: agent-npm-config
+    external: true
+  # Per-repo (SANDBOX_VOL_ID = sanitized basename + full-path hash, from
+  # write-env.cjs — two checkouts named `frontend` under different parents get
+  # distinct volumes), NOT external: it's a rebuildable cache, so compose
+  # owning its lifecycle is correct.
+  node-modules:
+    name: sandbox-node-modules-${SANDBOX_VOL_ID:-app}

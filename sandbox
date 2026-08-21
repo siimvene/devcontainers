@@ -130,10 +130,10 @@ if [ "${1:-}" = "init" ]; then
          read -r yn; case "$yn" in n|N) ;; *) gh auth login --web --git-protocol https || true ;; esac
        fi
        if command -v gh >/dev/null && gh auth token >/dev/null 2>&1; then
-         note "storing your gh CLI token (broad scope — swap for a fine-grained PAT when convenient)"
+         note "storing your gh CLI token (broad scope; OAuth works with GitHub Packages — add read:packages via 'gh auth refresh' if private installs fail)"
          store github-token "$(gh auth token)" && ok "github-token stored from gh CLI"
        else
-         note "no gh login found. Mint a fine-grained PAT (github.com → Settings → Developer settings)"
+         note "no gh login found. Mint a classic PAT with repo + read:packages (github.com → Settings → Developer settings; GitHub Packages rejects fine-grained PATs)"
          printf '  paste PAT (or Enter to skip): '; read -rs t; echo
          case "$t" in
            ghp_*|github_pat_*) store github-token "$t" && ok "github-token stored" ;;
@@ -197,7 +197,10 @@ if [ "${1:-}" = "init" ]; then
   t=$(field claude-token); case "$t" in sk-ant*) ok "claude token: shape valid (sk-ant…, ${#t} chars)";; *) bad "claude token missing/odd"; fail=1;; esac
   t=$(field github-token)
   if [ -n "$t" ]; then
-    login=$(curl -sf -H "Authorization: Bearer $t" https://api.github.com/user 2>/dev/null | grep -o '"login": *"[^"]*"' | cut -d'"' -f4)
+    # || login="" is load-bearing under set -euo pipefail: a rejected token
+    # (curl -f exits 22) or a grep miss would otherwise abort init at this
+    # assignment, making the "rejected" branch below unreachable.
+    login=$(curl -sf --max-time 10 -H "Authorization: Bearer $t" https://api.github.com/user 2>/dev/null | grep -o '"login": *"[^"]*"' | cut -d'"' -f4) || login=""
     if [ -n "$login" ]; then
       ok "github: authenticates as '$login'"
       # Package registries (GitHub Packages maven/npm) take the token as the
@@ -205,8 +208,38 @@ if [ "${1:-}" = "init" ]; then
       # a null username outright — persist the validated login (not a secret).
       echo "GITHUB_USER=$login" >> "$AGENT_ENV"
       ok "GITHUB_USER=$login written (build tools need a username besides the token)"
+      # GitHub Packages readiness — ADVISORY only. A repo with private
+      # npm/maven deps needs a packages-capable token, and the failure would
+      # otherwise surface four steps later as an E403 mid-`npm ci` phrased as a
+      # policy/server problem — so name it here. But a token perfectly fine for
+      # git/API (a least-privilege fine-grained PAT with no packages access) is
+      # exactly right for a repo with NO private packages: this is a note, never
+      # a hard fail, so the generic path makes no private-package assumption.
+      # Two shapes to name: fine-grained PATs (github_pat_*) are rejected by
+      # GitHub Packages outright — the registry accepts only classic/OAuth
+      # tokens (docs: "GitHub Packages only supports authentication using a
+      # personal access token (classic)") — and classic/OAuth tokens need the
+      # read:packages scope, which they report in the x-oauth-scopes response
+      # header. The probe must not take init down with it: this script runs
+      # set -euo pipefail, so the curl gets an explicit || fallback and a
+      # --max-time so a wedged connection cannot hang the validation step.
+      case "$t" in
+        github_pat_*)
+          note "github: fine-grained PAT — fine for git/API and public registries. If this repo installs PRIVATE GitHub Packages, they will E403 (the registry accepts only classic/OAuth tokens): gh auth refresh -h github.com -s read:packages, or mint a classic PAT with read:packages, then clear the stored github-token and rerun 'sandbox init' (init keeps an existing token; it does not re-capture)" ;;
+        *)
+          hdrs=$(curl -sfI --max-time 10 -H "Authorization: Bearer $t" https://api.github.com/user 2>/dev/null) || hdrs=""
+          if [ -z "$hdrs" ]; then
+            note "github: could not read token scopes (transient network?) — if this repo uses private GitHub Packages, ensure the token grants 'read:packages' or those installs E403"
+          else
+            scopes=$(printf '%s' "$hdrs" | tr -d '\r' | sed -n 's/^[Xx]-[Oo][Aa]uth-[Ss]copes: //p') || scopes=""
+            case "$scopes" in
+              *read:packages*|*write:packages*) ok "github: read:packages granted (private npm/maven registries resolve)" ;;
+              *) note "github: token has no 'read:packages' scope — fine unless this repo installs private GitHub Packages, which would then E403: gh auth refresh -h github.com -s read:packages, then clear the stored github-token and rerun 'sandbox init'" ;;
+            esac
+          fi ;;
+      esac
     else
-      bad "github token rejected (401?)"; fail=1
+      bad "github token rejected (401?) or api.github.com unreachable"; fail=1
     fi
   fi
   if [ -n "$ATL_EMAIL" ]; then
@@ -259,14 +292,28 @@ if [ "${1:-}" = "sync" ]; then
   # Portable replace-with-deletions (Git Bash ships no rsync): stash the
   # repo-owned files, wipe, copy the template wholesale, restore the stash.
   keep="$tmp/keep"; mkdir "$keep"
-  for f in .env TEMPLATE_VARIANT; do
+  # docker-compose.override.yml is on the keep-list: it is the repo's designated
+  # local-patch slot (see the stub's header), so sync must never flatten it back
+  # to the template's empty stub.
+  for f in .env TEMPLATE_VARIANT docker-compose.override.yml; do
     [ -f "$dir/.devcontainer/$f" ] && cp "$dir/.devcontainer/$f" "$keep/$f"
   done
   rm -rf "$dir/.devcontainer"
   cp -R "$srcdir" "$dir/.devcontainer"
-  for f in .env TEMPLATE_VARIANT; do
+  for f in .env TEMPLATE_VARIANT docker-compose.override.yml; do
     [ -f "$keep/$f" ] && cp "$keep/$f" "$dir/.devcontainer/$f"
   done
+  # Activation tripwire: before 2026-08-12a devcontainer.json never loaded the
+  # override file, so a repo may carry one that has been DEAD WEIGHT for its
+  # whole life — and this sync just wired it into the live compose config. A
+  # dormant `networks: [egress]` on the workload would bypass the gateway
+  # boundary the moment it loads. Kept-but-differs-from-stub = say so loudly.
+  if [ -f "$keep/docker-compose.override.yml" ] \
+     && ! cmp -s "$keep/docker-compose.override.yml" "$srcdir/docker-compose.override.yml" 2>/dev/null; then
+    echo "  WARN: repo's docker-compose.override.yml was KEPT and is now LOADED into the compose"
+    echo "        config (templates before 2026-08-12a ignored this file). Review it before"
+    echo "        rebuild: every service/network/mount/env it declares is live in the sandbox."
+  fi
   new_ver=$(sed -n 1p "$VFILE")
 
   if [ -n "$variant" ]; then
@@ -381,6 +428,16 @@ mounts_of() { docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}
 # field on Windows: a fresh container came up mounting /workspaces/app).
 export SANDBOX_REPO="$repo_name"
 
+# Same belt for ${SANDBOX_VOL_ID} (the per-repo node_modules volume name):
+# run the writer now and lift the value out of .env. Parsed, not sourced —
+# compose .env is not shell syntax, and a repo name with a space would make
+# `.`-sourcing execute the second word as a command.
+if [ -f "$dir/.devcontainer/write-env.cjs" ]; then
+  (cd "$dir" && node .devcontainer/write-env.cjs) || true
+  vol_id=$(grep '^SANDBOX_VOL_ID=' "$dir/.devcontainer/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+  [ -n "$vol_id" ] && export SANDBOX_VOL_ID="$vol_id"
+fi
+
 # Self-heal mount drift: `devcontainer up` reuses an existing container
 # (--no-recreate), so a workload created by an older template can mount the
 # repo at a path the current workspaceFolder no longer points at (e.g. the
@@ -390,6 +447,17 @@ if [ -z "$rebuild" ]; then
   cid=$(docker ps -aq -f "name=$workload_filter" 2>/dev/null | head -1)
   if [ -n "$cid" ] && ! mounts_of "$cid" | grep -qx "/workspaces/${repo_name}"; then
     echo "sandbox: existing container mounts the repo at an outdated path — recreating ..."
+    rebuild="--remove-existing-container"
+  fi
+  # Same drift class, newer symptom: a container created before the template
+  # grew the node_modules isolation volume still shares the HOST's tree through
+  # the bind mount — the synced boot check then runs against the old topology,
+  # silently skips the npm credential (its volume gate fails), and a container
+  # `npm ci` can wipe the host's install. Compose declaring the volume while
+  # the container lacks the mount = recreate, not reuse.
+  if [ -n "$cid" ] && grep -q '^  node-modules:' "$dir/.devcontainer/docker-compose.yml" 2>/dev/null \
+     && ! mounts_of "$cid" | grep -qx "/workspaces/${repo_name}/node_modules"; then
+    echo "sandbox: existing container predates the node_modules isolation volume — recreating ..."
     rebuild="--remove-existing-container"
   fi
 fi

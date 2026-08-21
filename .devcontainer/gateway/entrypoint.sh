@@ -21,7 +21,11 @@ BASE_DOMAINS="
   raw.githubusercontent.com
   release-assets.githubusercontent.com
   registry.npmjs.org
+  pkg-npm.githubusercontent.com
 "
+# pkg-npm.githubusercontent.com: GitHub Packages npm tarball CDN —
+# npm.pkg.github.com (allowed via the github.com subdomain rule) 302s package
+# downloads there, and the specific-subdomain entries above don't cover it.
 
 FILTER=/tmp/allowlist.filter
 : > "$FILTER"
@@ -46,7 +50,13 @@ User nobody
 Group nogroup
 Port 8888
 Listen 0.0.0.0
-Timeout 600
+# Bursty build tasks (e.g. the gradle node-plugin's npmInstall behind a webpack
+# task) fan out many parallel CONNECT tunnels. tinyproxy's default MaxClients
+# (~100) plus a 600s idle Timeout means those keepalive tunnels are held for up
+# to 10 min, the worker pool exhausts, and further connections block — the task
+# appears to "stall". Give the pool headroom and release idle tunnels quickly.
+MaxClients 512
+Timeout 60
 # Client ACL: only private-range (docker-network) peers may use the proxy. The
 # port is never published to the host, so the public internet cannot reach it.
 Allow 10.0.0.0/8
