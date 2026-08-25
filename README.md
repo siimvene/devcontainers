@@ -21,9 +21,11 @@ Autonomy (auto / bypass-permissions mode) is a separate axis and it lives in the
 those modes run only inside the container, kept off the host by managed settings (see
 [Enforcement](#enforcement--autonomy-lives-in-the-box)).
 
-Delegation is the point, not an accident: the container gets scoped service tokens
-for Jira and GitHub precisely so agents can update tickets and open PRs — as an
-attributable bot identity with a project/repo allowlist, never as you.
+Delegation is the point, not an accident: the container gets tokens for Jira and
+GitHub precisely so agents can update tickets and open PRs. The recommended shape is
+an attributable bot identity with a project/repo allowlist rather than your own; a
+personal identity also works, and the boot check warns and points you at a scoped
+service account (see "The one rule").
 
 ![Agent sandbox architecture](assets/devcontainer-architecture.svg)
 
@@ -241,6 +243,8 @@ cp -R .devcontainer <your-repo>/    # includes gateway/
 #   1. merge .devcontainer/mcp/with-atlassian.mcp.json into the repo's .mcp.json
 #   2. add your Atlassian domain to the x-extra-allowed-domains anchor in
 #      .devcontainer/docker-compose.yml (one place; both workload and gateway read it)
+#   3. the server is uvx-launched — the image ships no uv/PyPI access, so also add
+#      the uv + PyPI prerequisites listed in that mcp.json's $comment, or it won't start
 ```
 
 Open the repo in VS Code → **Reopen in Container**. First build takes minutes, cached
@@ -278,7 +282,9 @@ the base profile. To enable:
    serves the plugins from the tree you're editing.
 
 The boot check reports Codex install/auth state on every start, next to the identity
-line, so an unattended run never discovers a missing second vendor mid-task.
+line; under `AGENT_REQUIRE_AUTH=1` a repo that set `OPENAI_API_KEY` but whose Codex
+install failed is refused at boot, so an unattended run never discovers a missing
+second vendor mid-task.
 
 ## Node repos — private npm packages, `node_modules`
 
@@ -384,8 +390,10 @@ per machine, and both CLIs self-refresh their sessions while in use. No per-repo
 per-rebuild ceremony. The boot check preflights auth on every start and prints the
 exact recovery command when a login is missing or expired; set `AGENT_REQUIRE_AUTH=1`
 for unattended repos so a bad credential — a missing/expired vendor login, an
-unresolved `op://` reference, or an API key the vendor rejects with a 401 — fails the run
-at boot instead of mid-task.
+unresolved `op://` reference, or an Anthropic/GitHub credential the API rejects with a
+401 — fails the run at boot instead of mid-task. (The Claude OAuth token and
+`OPENAI_API_KEY` are presence-checked, not live-probed: a 401 on the OAuth token would
+be a false negative, and api.openai.com is not in the base allowlist.)
 
 Pick the tier that matches who's responsible for the run:
 

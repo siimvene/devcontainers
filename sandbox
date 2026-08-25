@@ -355,9 +355,9 @@ if [ "${1:-}" = "sync" ]; then
   # recreation. Say so — reviewed-then-applied stays two deliberate steps
   # (sync is the reviewable half; rebuild kills a possibly-active session).
   if [ "$pre_hash" != "$(chash)" ]; then
-    # Compose lowercases the project name — match it or a MixedCase repo never
-    # gets the "container is RUNNING" hint.
-    repo_name=$(basename "$(cd "$dir" && pwd)" | tr '[:upper:]' '[:lower:]')
+    # Compose lowercases the project name and strips chars outside [a-z0-9_-] —
+    # match it or a MixedCase / spaced repo never gets the "container is RUNNING" hint.
+    repo_name=$(basename "$(cd "$dir" && pwd)" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${repo_name}_devcontainer"; then
       echo "container is RUNNING on the previous template — apply with: sandbox rebuild"
     else
@@ -425,7 +425,11 @@ fi
 repo_name=$(basename "$(cd "$dir" && pwd)")
 # Compose lowercases the project name, so filter container names through the
 # same transform (mount paths keep the original case).
-project_name=$(printf '%s' "$repo_name" | tr '[:upper:]' '[:lower:]')
+# Match compose's project-name derivation: lowercase AND strip anything outside
+# [a-z0-9_-]. A repo like "sample codes" becomes "samplecodes" in compose, so a
+# lowercase-only filter would miss the container and skip the ro-mount / node_modules
+# self-heal below (a stale writable container would slip through).
+project_name=$(printf '%s' "$repo_name" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
 workload_filter=${project_name}_devcontainer-workload
 mounts_of() { docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$1" 2>/dev/null; }
 

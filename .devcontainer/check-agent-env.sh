@@ -286,10 +286,12 @@ fi
 # actual behavior (can THIS user write?) and refuse, same class as proven-open
 # egress above.
 selfdir=$(cd "$(dirname "${BASH_SOURCE:-$0}")" && pwd)
-# Unique name + noclobber (set -C): a pre-planted unwritable/symlink .rw-probe
-# must not make a genuine write succeed-then-fail into a false "read-only" pass.
-rwprobe="$selfdir/.rw-probe.$$"
-if ( set -C; : > "$rwprobe" ) 2>/dev/null; then
+# mktemp with a random suffix, not a predictable $$ name: an agent in an OLD
+# writable container could pre-plant .rw-probe.<pid> so a create fails and we
+# mis-read that as read-only. mktemp CREATES the file (fails only when the dir
+# rejects writes) and the name is unguessable, so a successful create is proof
+# the dir is writable → refuse.
+if rwprobe=$(mktemp "$selfdir/.rw-probe.XXXXXX" 2>/dev/null); then
   rm -f "$rwprobe"
   echo "REFUSED: .devcontainer is WRITABLE from the workload — an agent write here is host code execution at the next relaunch; recreate the container ('sandbox rebuild' on the host) to pick up the read-only mount"
   exit 1
@@ -339,6 +341,12 @@ if command -v codex >/dev/null; then
     echo "codex: NOT authenticated — run 'codex login' once (attended) before unattended runs"
     auth_missing=1
   fi
+elif [ -n "${OPENAI_API_KEY:-}" ]; then
+  # OPENAI_API_KEY set but codex absent = the cross-vendor install failed
+  # (setup-cross-vendor.sh warns, does not abort). The repo intends a second
+  # vendor; an unattended run must fail here, not discover it mid-task.
+  echo "codex: NOT installed but OPENAI_API_KEY is set — cross-vendor tooling missing (install failed?)"
+  auth_missing=1
 fi
 
 if [ "$auth_missing" = 1 ] && [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
@@ -625,6 +633,17 @@ if [ -f "$PWD/.claude/settings.local.json" ] \
 fi
 
 if [ -z "${ATLASSIAN_AGENT_TOKEN:-}" ]; then
+  # A truly base repo sets NO Atlassian vars. If URL/email are set but the token
+  # is empty, the credential failed to resolve (e.g. an unresolved op:// ref) —
+  # that is NOT the base profile; an enabled MCP would fail mid-task.
+  if [ -n "${ATLASSIAN_URL:-}" ] || [ -n "${ATLASSIAN_AGENT_EMAIL:-}" ]; then
+    if [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
+      echo "REFUSED: ATLASSIAN_URL/EMAIL are set but ATLASSIAN_AGENT_TOKEN is empty — the Atlassian credential did not resolve; fix before an unattended run."
+      exit 1
+    fi
+    echo "WARN: Atlassian URL/email set but token is empty — MCP calls will fail; not treating this as the base profile."
+    exit 0
+  fi
   echo "profile: base (no MCP data sources wired) — agent reaches code + allowlisted registries only"
   exit 0
 fi
@@ -649,6 +668,20 @@ case "$me_code" in
       exit 1
     fi
     echo "WARN: Atlassian token rejected (HTTP $me_code) — expired or revoked; MCP calls will fail the same way."
+    exit 0 ;;
+esac
+
+# Only a 2xx makes the response body trustworthy. A non-2xx (5xx, 000, redirect,
+# 404) can still carry a stale/cached user-shaped body with "displayName" — do
+# NOT let that parse as a valid identity. Indeterminate = fail closed unattended.
+case "$me_code" in
+  2??) : ;;
+  *)
+    if [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
+      echo "REFUSED: Atlassian check returned HTTP ${me_code:-000} — credential validity indeterminate; fix before an unattended run."
+      exit 1
+    fi
+    echo "WARN: Atlassian check returned HTTP ${me_code:-000} — credential validity not established; MCP may fail."
     exit 0 ;;
 esac
 
