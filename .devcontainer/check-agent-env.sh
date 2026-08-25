@@ -285,7 +285,11 @@ fi
 # warm containers reach this check with the old topology intact — so probe the
 # actual behavior (can THIS user write?) and refuse, same class as proven-open
 # egress above.
-selfdir=$(cd "$(dirname "${BASH_SOURCE:-$0}")" && pwd)
+# Resolve the script's dir with builtins only (no external `dirname` a root agent
+# could PATH-shadow to point the probe at a non-writable dir and fake a pass):
+# `${var%/*}` strips the filename, `cd`/`pwd` are bash builtins.
+_src="${BASH_SOURCE:-$0}"; _dir="${_src%/*}"; [ "$_dir" = "$_src" ] && _dir="."
+selfdir=$(cd "$_dir" && pwd)
 # Probe writability with SHELL BUILTINS only — no external binary a root agent
 # could remove to force a false "read-only" pass (mktemp/touch are removable;
 # `set -C` + redirection and $RANDOM are builtins that can't be). $RANDOM×2+$$
