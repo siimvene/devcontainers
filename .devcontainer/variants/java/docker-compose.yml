@@ -67,6 +67,17 @@ services:
       - ..:/workspaces/${SANDBOX_REPO:-app}:cached
       - claude-config:/home/node/.claude
       - codex-config:/home/node/.codex
+      # node_modules is a per-repo named volume shadowing the bind mount — same
+      # contract as the base template (native binaries are per-platform, and a
+      # container `npm ci` must not delete the HOST's tree through the bind
+      # mount). The gradle-node-plugin frontend modules need it too.
+      - node-modules:/workspaces/${SANDBOX_REPO:-app}/node_modules
+      # .devcontainer overlaid read-only (more-specific nested mount wins, same
+      # mechanism as node_modules above): initializeCommand runs these files ON
+      # THE HOST at every up, so an agent write here is host code execution at
+      # the next relaunch. write-env.cjs is unaffected — it runs host-side,
+      # before the container exists.
+      - ../.devcontainer:/workspaces/${SANDBOX_REPO:-app}/.devcontainer:ro
       - bash-history:/commandhistory
       - gradle-cache:/home/node/.gradle
       - npm-config:/home/node/.npm-config
@@ -125,3 +136,9 @@ volumes:
   npm-config:
     name: agent-npm-config
     external: true
+  # Per-repo (SANDBOX_VOL_ID = sanitized basename + full-path hash, from
+  # write-env.cjs — two checkouts named `frontend` under different parents get
+  # distinct volumes), NOT external: it's a rebuildable cache, so compose
+  # owning its lifecycle is correct.
+  node-modules:
+    name: sandbox-node-modules-${SANDBOX_VOL_ID:-app}

@@ -45,8 +45,7 @@
     "ATLASSIAN_AGENT_EMAIL": "${localEnv:ATLASSIAN_AGENT_EMAIL}",
     "ATLASSIAN_AGENT_TOKEN": "${localEnv:ATLASSIAN_AGENT_TOKEN}",
     "AGENT_IDENTITY_PATTERN": "${localEnv:AGENT_IDENTITY_PATTERN}",
-    "AGENT_REQUIRE_AUTH": "${localEnv:AGENT_REQUIRE_AUTH}",
-    "AGENT_ALLOW_PERSONAL": "${localEnv:AGENT_ALLOW_PERSONAL}"
+    "AGENT_REQUIRE_AUTH": "${localEnv:AGENT_REQUIRE_AUTH}"
   },
 
   "features": {
@@ -81,7 +80,7 @@
   // ${containerWorkspaceFolder}, which the shell would re-parse: a directory
   // named `repo$(...)` or holding a space would command-substitute or split and
   // break the && chain. Lifecycle commands already run from the workspace folder.
-  "postCreateCommand": "mountpoint -q /home/node/.gradle || { echo 'ERROR: gradle-cache volume not mounted — you are running the java variant devcontainer.json against the BASE docker-compose.yml. Copy variants/java/docker-compose.yml over .devcontainer/docker-compose.yml and rebuild.'; exit 1; }; sudo chown node:node /home/node/.claude /home/node/.codex /home/node/.gradle /home/node/.npm-config /commandhistory && git config --global --add safe.directory \"$PWD\" && bash .devcontainer/setup-cross-vendor.sh && bash .devcontainer/setup-memspec.sh && bash .devcontainer/variants/java/configure-gradle-toolchains.sh",
+  "postCreateCommand": "mountpoint -q /home/node/.gradle || { echo 'ERROR: gradle-cache volume not mounted — you are running the java variant devcontainer.json against the BASE docker-compose.yml. Copy variants/java/docker-compose.yml over .devcontainer/docker-compose.yml and rebuild.'; exit 1; }; sudo chown node:node /home/node/.claude /home/node/.codex /home/node/.gradle /home/node/.npm-config /commandhistory \"$PWD/node_modules\" && git config --global --add safe.directory \"$PWD\" && bash .devcontainer/setup-cross-vendor.sh && bash .devcontainer/setup-memspec.sh && bash .devcontainer/variants/java/configure-gradle-toolchains.sh",
   "postStartCommand": "bash .devcontainer/check-agent-env.sh",
 
   "customizations": {

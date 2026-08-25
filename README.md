@@ -32,9 +32,9 @@ attributable bot identity with a project/repo allowlist, never as you.
 **Nothing enters the container's environment that you wouldn't knowingly hand the
 agent.** Env vars are fully readable from inside (deny rules don't stop `env` or
 `cat`). That is fine by design when the tokens are scoped service identities —
-visible-but-narrow is the contract. Personal data-plane tokens never go in; the boot
-check refuses them. (Attended experiments inside the container can override with
-`AGENT_ALLOW_PERSONAL=1` — same trust as a host session, but say it explicitly.)
+visible-but-narrow is the contract. A personal identity still works, but the boot
+check warns on it and recommends a scoped service account — the right call for any
+unattended fleet, where a borrowed token reads everything you can.
 
 ## Security model — the box is host-enforced
 
@@ -59,6 +59,9 @@ What that closes, concretely:
 - **No external DNS** from the workload, so DNS-tunnel exfiltration has no channel.
 - **Root in the workload is harmless for egress** — no firewall to flush, no route to
   add, no capability to abuse.
+- **The agent can't rewrite its own sandbox.** `.devcontainer/` mounts read-only in the
+  workload, so the container can't edit the compose topology, gateway allowlist, or boot
+  check that fence it in — those changes happen on the host, in a reviewable diff.
 
 The allowlist is the written-down answer to "which systems can this agent reach": the
 base set (Anthropic, GitHub, npm) plus whatever `EXTRA_ALLOWED_DOMAINS` names, rendered
@@ -112,9 +115,11 @@ substitute for keeping those tokens scoped.
   idempotently. They ship empty here — set them to your org's marketplace to opt in.
   Private marketplace clones need `GITHUB_TOKEN`, so an IDE-launched session defers
   provisioning to the first `sandbox` run — the volume keeps the result.
-- **The lazy path is the narrow path.** Variant env names only fit scoped tokens
-  (`ATLASSIAN_AGENT_RO_TOKEN`); the boot check calls the API and refuses to proceed if
-  the identity doesn't look like a service account.
+- **The lazy path is the narrow path.** The variant reads one Atlassian token
+  (`ATLASSIAN_AGENT_TOKEN`); the boot check calls the API, prints the identity it
+  authenticates as, and warns when it doesn't look like a service account (a personal
+  identity is accepted, not gated). A token the API rejects (HTTP 401/403) warns too,
+  and refuses the boot under `AGENT_REQUIRE_AUTH=1`.
 
 ## Platforms
 
@@ -163,8 +168,8 @@ sandbox rebuild            # recreate the container so synced changes actually a
 
 `sandbox` brings the container up (seconds when cached), prints the boot check —
 which identities Jira/GitHub calls run as, whether vendor auth is alive, the egress
-containment self-test — and drops you into Claude. Same repo checkout as the host
-(bind mount), so nothing to sync.
+containment self-test (a breach here refuses the boot) — and drops you into Claude.
+Same repo checkout as the host (bind mount), so nothing to sync.
 
 `sandbox sync` preserves the repo-owned compose anchors (egress allowlist, plugin
 provisioning) and the `docker-compose.override.yml` local-patch slot across template
@@ -362,7 +367,9 @@ repo sandbox on a machine shares one auth volume per vendor**: log in once per v
 per machine, and both CLIs self-refresh their sessions while in use. No per-repo, no
 per-rebuild ceremony. The boot check preflights auth on every start and prints the
 exact recovery command when a login is missing or expired; set `AGENT_REQUIRE_AUTH=1`
-for unattended repos so a dead login fails the run at boot instead of mid-task.
+for unattended repos so a bad credential — a missing/expired vendor login, an
+unresolved `op://` reference, or an API key the vendor rejects with a 401 — fails the run
+at boot instead of mid-task.
 
 Pick the tier that matches who's responsible for the run:
 

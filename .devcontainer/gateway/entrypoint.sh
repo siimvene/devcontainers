@@ -14,7 +14,6 @@ BASE_DOMAINS="
   claude.ai
   platform.claude.com
   statsig.anthropic.com
-  sentry.io
   github.com
   api.github.com
   objects.githubusercontent.com
@@ -26,6 +25,9 @@ BASE_DOMAINS="
 # pkg-npm.githubusercontent.com: GitHub Packages npm tarball CDN —
 # npm.pkg.github.com (allowed via the github.com subdomain rule) 302s package
 # downloads there, and the specific-subdomain entries above don't cover it.
+# sentry.io deliberately absent: it accepts events for ANY tenant
+# unauthenticated, so allowing it hands the agent a generic exfil sink. Repos
+# that need their own Sentry add their tenant host via EXTRA_ALLOWED_DOMAINS.
 
 FILTER=/tmp/allowlist.filter
 : > "$FILTER"
