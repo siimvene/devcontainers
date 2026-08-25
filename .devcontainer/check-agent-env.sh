@@ -286,12 +286,13 @@ fi
 # actual behavior (can THIS user write?) and refuse, same class as proven-open
 # egress above.
 selfdir=$(cd "$(dirname "${BASH_SOURCE:-$0}")" && pwd)
-# mktemp with a random suffix, not a predictable $$ name: an agent in an OLD
-# writable container could pre-plant .rw-probe.<pid> so a create fails and we
-# mis-read that as read-only. mktemp CREATES the file (fails only when the dir
-# rejects writes) and the name is unguessable, so a successful create is proof
-# the dir is writable → refuse.
-if rwprobe=$(mktemp "$selfdir/.rw-probe.XXXXXX" 2>/dev/null); then
+# Probe writability with SHELL BUILTINS only — no external binary a root agent
+# could remove to force a false "read-only" pass (mktemp/touch are removable;
+# `set -C` + redirection and $RANDOM are builtins that can't be). $RANDOM×2+$$
+# makes the name unguessable, so a pre-planted decoy can't make noclobber fail;
+# a successful create (only possible on a WRITABLE dir) is proof → refuse.
+rwprobe="$selfdir/.rw-probe.${RANDOM}${RANDOM}$$"
+if ( set -C; : > "$rwprobe" ) 2>/dev/null; then
   rm -f "$rwprobe"
   echo "REFUSED: .devcontainer is WRITABLE from the workload — an agent write here is host code execution at the next relaunch; recreate the container ('sandbox rebuild' on the host) to pick up the read-only mount"
   exit 1
