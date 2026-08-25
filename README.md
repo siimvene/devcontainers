@@ -21,9 +21,11 @@ Autonomy (auto / bypass-permissions mode) is a separate axis and it lives in the
 those modes run only inside the container, kept off the host by managed settings (see
 [Enforcement](#enforcement--autonomy-lives-in-the-box)).
 
-Delegation is the point, not an accident: the container gets scoped service tokens
-for Jira and GitHub precisely so agents can update tickets and open PRs — as an
-attributable bot identity with a project/repo allowlist, never as you.
+Delegation is the point, not an accident: the container gets tokens for Jira and
+GitHub precisely so agents can update tickets and open PRs. The recommended shape is
+an attributable bot identity with a project/repo allowlist rather than your own; a
+personal identity also works, and the boot check warns and points you at a scoped
+service account (see "The one rule").
 
 ![Agent sandbox architecture](assets/devcontainer-architecture.svg)
 
@@ -32,9 +34,9 @@ attributable bot identity with a project/repo allowlist, never as you.
 **Nothing enters the container's environment that you wouldn't knowingly hand the
 agent.** Env vars are fully readable from inside (deny rules don't stop `env` or
 `cat`). That is fine by design when the tokens are scoped service identities —
-visible-but-narrow is the contract. Personal data-plane tokens never go in; the boot
-check refuses them. (Attended experiments inside the container can override with
-`AGENT_ALLOW_PERSONAL=1` — same trust as a host session, but say it explicitly.)
+visible-but-narrow is the contract. A personal identity still works, but the boot
+check warns on it and recommends a scoped service account — the right call for any
+unattended fleet, where a borrowed token reads everything you can.
 
 ## Security model — the box is host-enforced
 
@@ -59,6 +61,9 @@ What that closes, concretely:
 - **No external DNS** from the workload, so DNS-tunnel exfiltration has no channel.
 - **Root in the workload is harmless for egress** — no firewall to flush, no route to
   add, no capability to abuse.
+- **The agent can't rewrite its own sandbox.** `.devcontainer/` mounts read-only in the
+  workload, so the container can't edit the compose topology, gateway allowlist, or boot
+  check that fence it in — those changes happen on the host, in a reviewable diff.
 
 The allowlist is the written-down answer to "which systems can this agent reach": the
 base set (Anthropic, GitHub, npm) plus whatever `EXTRA_ALLOWED_DOMAINS` names, rendered
@@ -67,6 +72,22 @@ contain: the scoped service tokens you deliberately hand the workload are readab
 inside it by design, and the agent can use an allowlisted destination as itself (push to
 a repo its token can reach). Egress containment is the network boundary, not a
 substitute for keeping those tokens scoped.
+
+**Do git inside the container, not on the host.** The repo is bind-mounted into the
+workload writable, `.git` included, because the agent has to commit its own work. That
+also means the agent controls `.git/config`, and git turns config into code execution in
+more places than hooks: `core.fsmonitor` runs on a plain `git status`, and
+`core.sshCommand`, `core.pager`, `credential.helper`, `diff.external`, and `!`-aliases
+are all command hooks too. So **any** host-side git in a sandbox repo can run agent-chosen
+code as you, and there is no reliable way to neutralize that from the host side (git
+always reads the repo's local config; you can't patch every exec key). A planted hook or
+config value is untracked, so it never shows up in a PR, and it can fire before a PR even
+exists. The safe path is to keep git *inside the container*: open the repo through **VS
+Code Dev Containers** or **JetBrains Remote Development** so the IDE's terminal and git
+run in the box (husky/pre-commit stay contained there), or use the container's own
+terminal. Treat the host checkout as agent-writable and don't run host-side git in it.
+`sandbox` prints a NOTE at launch if it finds installed hooks in `.git/hooks`. This is the
+one host-execution path the read-only `.devcontainer` mount does not cover.
 
 ## What you get
 
@@ -112,9 +133,11 @@ substitute for keeping those tokens scoped.
   idempotently. They ship empty here — set them to your org's marketplace to opt in.
   Private marketplace clones need `GITHUB_TOKEN`, so an IDE-launched session defers
   provisioning to the first `sandbox` run — the volume keeps the result.
-- **The lazy path is the narrow path.** Variant env names only fit scoped tokens
-  (`ATLASSIAN_AGENT_RO_TOKEN`); the boot check calls the API and refuses to proceed if
-  the identity doesn't look like a service account.
+- **The lazy path is the narrow path.** The variant reads one Atlassian token
+  (`ATLASSIAN_AGENT_TOKEN`); the boot check calls the API, prints the identity it
+  authenticates as, and warns when it doesn't look like a service account (a personal
+  identity is accepted, not gated). A token the API rejects (HTTP 401/403) warns too,
+  and refuses the boot under `AGENT_REQUIRE_AUTH=1`.
 
 ## Platforms
 
@@ -163,8 +186,8 @@ sandbox rebuild            # recreate the container so synced changes actually a
 
 `sandbox` brings the container up (seconds when cached), prints the boot check —
 which identities Jira/GitHub calls run as, whether vendor auth is alive, the egress
-containment self-test — and drops you into Claude. Same repo checkout as the host
-(bind mount), so nothing to sync.
+containment self-test (a breach here refuses the boot) — and drops you into Claude.
+Same repo checkout as the host (bind mount), so nothing to sync.
 
 `sandbox sync` preserves the repo-owned compose anchors (egress allowlist, plugin
 provisioning) and the `docker-compose.override.yml` local-patch slot across template
@@ -220,6 +243,8 @@ cp -R .devcontainer <your-repo>/    # includes gateway/
 #   1. merge .devcontainer/mcp/with-atlassian.mcp.json into the repo's .mcp.json
 #   2. add your Atlassian domain to the x-extra-allowed-domains anchor in
 #      .devcontainer/docker-compose.yml (one place; both workload and gateway read it)
+#   3. the server is uvx-launched — the image ships no uv/PyPI access, so also add
+#      the uv + PyPI prerequisites listed in that mcp.json's $comment, or it won't start
 ```
 
 Open the repo in VS Code → **Reopen in Container**. First build takes minutes, cached
@@ -257,7 +282,9 @@ the base profile. To enable:
    serves the plugins from the tree you're editing.
 
 The boot check reports Codex install/auth state on every start, next to the identity
-line, so an unattended run never discovers a missing second vendor mid-task.
+line; under `AGENT_REQUIRE_AUTH=1` a repo that set `OPENAI_API_KEY` but whose Codex
+install failed is refused at boot, so an unattended run never discovers a missing
+second vendor mid-task.
 
 ## Node repos — private npm packages, `node_modules`
 
@@ -362,7 +389,11 @@ repo sandbox on a machine shares one auth volume per vendor**: log in once per v
 per machine, and both CLIs self-refresh their sessions while in use. No per-repo, no
 per-rebuild ceremony. The boot check preflights auth on every start and prints the
 exact recovery command when a login is missing or expired; set `AGENT_REQUIRE_AUTH=1`
-for unattended repos so a dead login fails the run at boot instead of mid-task.
+for unattended repos so a bad credential — a missing/expired vendor login, an
+unresolved `op://` reference, or an Anthropic/GitHub credential the API rejects with a
+401 — fails the run at boot instead of mid-task. (The Claude OAuth token and
+`OPENAI_API_KEY` are presence-checked, not live-probed: a 401 on the OAuth token would
+be a false negative, and api.openai.com is not in the base allowlist.)
 
 Pick the tier that matches who's responsible for the run:
 

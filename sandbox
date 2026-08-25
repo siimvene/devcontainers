@@ -110,7 +110,10 @@ if [ "${1:-}" = "init" ]; then
   case "$v" in
     sk-ant*) ok "claude-token present" ;;
     *) note "browser will open — approve, token is captured directly into the vault"
-       t=$(claude setup-token 2>/dev/null | grep -oE 'sk-ant-[A-Za-z0-9_-]+' | tail -1)
+       # || t="" is load-bearing under set -euo pipefail: a grep miss (no token
+       # emitted) would otherwise abort init here, making the paste fallback
+       # below unreachable.
+       t=$(claude setup-token 2>/dev/null | grep -oE 'sk-ant-[A-Za-z0-9_-]+' | tail -1) || t=""
        case "$t" in
          sk-ant*) store claude-token "$t" && ok "claude-token stored" ;;
          *) bad "could not capture token — run 'claude setup-token', paste result:"
@@ -182,8 +185,7 @@ if [ "${1:-}" = "init" ]; then
       echo "ATLASSIAN_URL=$ATL_URL"
       echo "ATLASSIAN_AGENT_EMAIL=$ATL_EMAIL"
       echo "ATLASSIAN_AGENT_TOKEN=$(ref atlassian-token)"
-      echo "# personal Atlassian identity accepted in-box (attended) until an svc- account exists"
-      echo "AGENT_ALLOW_PERSONAL=1"
+      echo "# boot check warns on personal Atlassian identities — a scoped svc- account is recommended"
     fi
   } > "$AGENT_ENV"
   chmod 600 "$AGENT_ENV"
@@ -244,8 +246,11 @@ if [ "${1:-}" = "init" ]; then
   fi
   if [ -n "$ATL_EMAIL" ]; then
     t=$(field atlassian-token)
-    name=$(curl -sf --max-time 10 -u "$ATL_EMAIL:$t" "$ATL_URL/rest/api/2/myself" 2>/dev/null | grep -o '"displayName":"[^"]*"' | cut -d'"' -f4)
-    [ -n "$name" ] && ok "atlassian: authenticates as '$name'" || { bad "atlassian identity check failed (token/email/URL)"; fail=1; }
+    # || name="" mirrors the github guard above: a rejected token (curl -f
+    # exits 22) or a grep miss must land in the named bad line below, not
+    # abort init at this assignment.
+    name=$(curl -sf --max-time 10 -u "$ATL_EMAIL:$t" "$ATL_URL/rest/api/2/myself" 2>/dev/null | grep -o '"displayName":"[^"]*"' | cut -d'"' -f4) || name=""
+    [ -n "$name" ] && ok "atlassian: authenticates as '$name'" || { bad "atlassian identity check failed (token rejected, wrong email, or URL unreachable)"; fail=1; }
   fi
 
   echo
@@ -350,7 +355,9 @@ if [ "${1:-}" = "sync" ]; then
   # recreation. Say so — reviewed-then-applied stays two deliberate steps
   # (sync is the reviewable half; rebuild kills a possibly-active session).
   if [ "$pre_hash" != "$(chash)" ]; then
-    repo_name=$(basename "$(cd "$dir" && pwd)")
+    # Compose lowercases the project name and strips chars outside [a-z0-9_-] —
+    # match it or a MixedCase / spaced repo never gets the "container is RUNNING" hint.
+    repo_name=$(basename "$(cd "$dir" && pwd)" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${repo_name}_devcontainer"; then
       echo "container is RUNNING on the previous template — apply with: sandbox rebuild"
     else
@@ -418,8 +425,24 @@ fi
 repo_name=$(basename "$(cd "$dir" && pwd)")
 # Compose lowercases the project name, so filter container names through the
 # same transform (mount paths keep the original case).
-workload_filter=$(printf '%s' "$repo_name" | tr '[:upper:]' '[:lower:]')_devcontainer-workload
+# Match compose's project-name derivation: lowercase AND strip anything outside
+# [a-z0-9_-]. A repo like "sample codes" becomes "samplecodes" in compose, so a
+# lowercase-only filter would miss the container and skip the ro-mount / node_modules
+# self-heal below (a stale writable container would slip through).
+project_name=$(printf '%s' "$repo_name" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
+workload_filter=${project_name}_devcontainer-workload
 mounts_of() { docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$1" 2>/dev/null; }
+
+# Host-side git-hook tripwire: the agent can write .git/hooks through the bind
+# mount, and those run on the HOST if you `git` in this checkout directly. Warn
+# (don't block — harmless until host-side git runs). Do git INSIDE the container
+# (VS Code Dev Containers / JetBrains Remote Dev), where husky/pre-commit stay
+# contained; host-side git in a sandbox repo is not safe (see README).
+if [ -n "$(ls "$dir/.git/hooks" 2>/dev/null | grep -v '\.sample$' || true)" ]; then
+  echo "sandbox: NOTE — this repo has installed git hooks in .git/hooks; they run on the HOST" >&2
+  echo "  if you run git here. Filenames omitted (agent-writable). Do host-side git inside the" >&2
+  echo "  container instead; see the README git boundary section." >&2
+fi
 
 # Belt-and-suspenders for the per-repo mount: compose resolves ${SANDBOX_REPO}
 # from the process env FIRST, .devcontainer/.env second. The .env file (written
@@ -434,7 +457,9 @@ export SANDBOX_REPO="$repo_name"
 # `.`-sourcing execute the second word as a command.
 if [ -f "$dir/.devcontainer/write-env.cjs" ]; then
   (cd "$dir" && node .devcontainer/write-env.cjs) || true
-  vol_id=$(grep '^SANDBOX_VOL_ID=' "$dir/.devcontainer/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+  # || vol_id="" is load-bearing: no node on the host means no .env, and the
+  # grep miss would abort here instead of reaching the named tripwires below.
+  vol_id=$(grep '^SANDBOX_VOL_ID=' "$dir/.devcontainer/.env" 2>/dev/null | head -1 | cut -d= -f2-) || vol_id=""
   [ -n "$vol_id" ] && export SANDBOX_VOL_ID="$vol_id"
 fi
 
@@ -460,8 +485,17 @@ if [ -z "$rebuild" ]; then
     echo "sandbox: existing container predates the node_modules isolation volume — recreating ..."
     rebuild="--remove-existing-container"
   fi
+  # Same again for the read-only .devcontainer overlay: without it the agent
+  # keeps a WRITABLE .devcontainer through the bind mount, and a write there is
+  # host code execution at the next up (initializeCommand). Security drift —
+  # recreate, not reuse.
+  if [ -n "$cid" ] && grep -q '/\.devcontainer:ro' "$dir/.devcontainer/docker-compose.yml" 2>/dev/null \
+     && ! mounts_of "$cid" | grep -qx "/workspaces/${repo_name}/.devcontainer"; then
+    echo "sandbox: existing container predates the read-only .devcontainer mount — recreating ..."
+    rebuild="--remove-existing-container"
+  fi
 fi
-if [ -n "$rebuild" ] || ! docker ps -aq -f "name=${repo_name}_devcontainer" 2>/dev/null | grep -q .; then
+if [ -n "$rebuild" ] || ! docker ps -aq -f "name=${project_name}_devcontainer" 2>/dev/null | grep -q .; then
   [ -n "$rebuild" ] && echo "sandbox: recreating container (rebuild) ..." || echo "sandbox: first build for this repo — streaming ..."
   devcontainer up --workspace-folder "$dir" $rebuild || exit 1
 else

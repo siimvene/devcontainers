@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Boot check: print which identity the agent will read company data as, and refuse
-# personal accounts. The lazy path must be the narrow path — if the scoped service
-# identity isn't provisioned yet, the fix is provisioning it, not borrowing yours.
+# Boot check: print which identity the agent will read company data as, and warn
+# on personal accounts. Personal tokens are acceptable (owner policy); the nag
+# stays because a scoped service identity is still the right shape for fleets.
 set -uo pipefail
 
 echo "── agent environment check ──"
@@ -212,7 +212,15 @@ HUD
 chmod +x "$HOME/.claude/hud-statusline.sh"
 node -e '
   const fs=require("fs"),f=process.env.HOME+"/.claude/settings.json";
-  let s={};try{s=JSON.parse(fs.readFileSync(f,"utf8"))}catch{}
+  // Absent and unparseable must not collapse into the same branch (same
+  // contract as the .claude.json seeder above): rewriting a corrupt file as
+  // {} would destroy every user setting in the shared volume. Missing =
+  // start fresh; corrupt = say so and touch nothing.
+  let raw=null;try{raw=fs.readFileSync(f,"utf8")}catch{}
+  let s={};
+  if(raw!==null){try{s=JSON.parse(raw)}catch{
+    console.log("WARN: ~/.claude/settings.json is unparseable — leaving it alone; defaultMode/statusLine not reconciled");
+    process.exit(0)}}
   const msgs=[];
   s.permissions=s.permissions||{};
   if(!s.permissions.defaultMode){s.permissions.defaultMode="auto";
@@ -244,24 +252,78 @@ if command -v curl >/dev/null; then
     echo "egress WARNING: allowlisted host unreachable — gateway down or misconfigured"
   fi
   if curl -s --max-time 6 -o /dev/null https://example.com 2>/dev/null; then
-    echo "egress WARNING: default-deny NOT active (example.com reachable) — containment breached"
+    # Unconditional: a proven-open box must never launch. Gateway-down above is
+    # warn-only (fail-closed for the agent); this is the opposite failure.
+    echo "REFUSED: default-deny NOT active (example.com reachable) — containment breached; fix the gateway topology before launching"
+    exit 1
   else
     echo "egress: default-deny active (non-allowlisted host blocked)"
   fi
+  # Second axis: the deny above was answered BY the proxy, so it proves the
+  # filter, not the topology. A workload with a direct route (e.g. a dormant
+  # `networks: [egress]` in an override) would still pass it — probe once more
+  # bypassing the proxy; in a contained workload this has no route and fails.
+  if curl -s --noproxy '*' --max-time 6 -o /dev/null https://example.com 2>/dev/null; then
+    echo "REFUSED: workload has a DIRECT internet route (example.com reachable without the proxy) — the gateway boundary is bypassed; fix the compose topology before launching"
+    exit 1
+  else
+    echo "egress: no direct route (proxy is the only path out)"
+  fi
+elif [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
+  # The image ships curl; its absence in an unattended workload means the layer
+  # was tampered with. Refuse rather than skip the containment probes silently.
+  echo "REFUSED: curl is missing — cannot verify egress containment for an unattended run (AGENT_REQUIRE_AUTH=1)"
+  exit 1
+else
+  echo "WARN: curl missing — egress containment not verified"
+fi
+
+# Sandbox-immutability tripwire: a container created before the template gained
+# the read-only .devcontainer overlay keeps a WRITABLE .devcontainer through the
+# bind mount — an agent write there runs on the HOST at the next up
+# (initializeCommand). 'sandbox' self-heals this by recreating, but IDE-launched
+# warm containers reach this check with the old topology intact — so probe the
+# actual behavior (can THIS user write?) and refuse, same class as proven-open
+# egress above.
+# Resolve the script's dir with builtins only (no external `dirname` a root agent
+# could PATH-shadow to point the probe at a non-writable dir and fake a pass):
+# `${var%/*}` strips the filename, `cd`/`pwd` are bash builtins.
+_src="${BASH_SOURCE:-$0}"; _dir="${_src%/*}"; [ "$_dir" = "$_src" ] && _dir="."
+# CDPATH= so a stray CDPATH in the env can't make `cd` echo a resolved path into
+# the command substitution and corrupt selfdir.
+selfdir=$(CDPATH= cd "$_dir" && pwd)
+# Probe writability with SHELL BUILTINS only — no external binary a root agent
+# could remove to force a false "read-only" pass (mktemp/touch are removable;
+# `set -C` + redirection and $RANDOM are builtins that can't be). $RANDOM×2+$$
+# makes the name unguessable, so a pre-planted decoy can't make noclobber fail;
+# a successful create (only possible on a WRITABLE dir) is proof → refuse.
+rwprobe="$selfdir/.rw-probe.${RANDOM}${RANDOM}$$"
+if ( set -C; : > "$rwprobe" ) 2>/dev/null; then
+  rm -f "$rwprobe"
+  echo "REFUSED: .devcontainer is WRITABLE from the workload — an agent write here is host code execution at the next relaunch; recreate the container ('sandbox rebuild' on the host) to pick up the read-only mount"
+  exit 1
 fi
 
 # Credential-shape tripwires: catch host-side resolution failures HERE with a
 # name, instead of letting auth fail downstream with generic 401s/login links.
-for v in CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN ATLASSIAN_AGENT_TOKEN; do
+# Unattended (AGENT_REQUIRE_AUTH=1) a tripwire hit is fatal — the credential
+# WILL fail downstream, so failing here with a name is the whole point.
+cred_tripwire=0
+for v in CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN OPENAI_API_KEY GITHUB_TOKEN ATLASSIAN_AGENT_TOKEN; do
   val=$(eval "printf '%s' \"\${$v:-}\"")
   [ -z "$val" ] && continue
   case "$val" in
-    op://*) echo "WARN: $v is an UNRESOLVED op:// reference — 1Password resolution failed on the host (op CLI missing, locked, or not integrated); launch via 'sandbox', not directly" ;;
+    op://*) echo "WARN: $v is an UNRESOLVED op:// reference — 1Password resolution failed on the host (op CLI missing, locked, or not integrated); launch via 'sandbox', not directly"; cred_tripwire=1 ;;
   esac
   if printf '%s' "$val" | grep -q "$(printf '\r')"; then
     echo "WARN: $v contains a carriage return — the host env file was saved with Windows line endings; re-save ~/.agent/agent.env with LF (or rerun 'sandbox init')"
+    cred_tripwire=1
   fi
 done
+if [ "$cred_tripwire" = 1 ] && [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
+  echo "REFUSED: AGENT_REQUIRE_AUTH=1 and a credential failed the shape tripwires (see above)."
+  exit 1
+fi
 
 # LLM auth preflight — vendor logins expire; fail before the task starts, not
 # mid-run. AGENT_REQUIRE_AUTH=1 (unattended repos/CI) turns warnings into exit 1.
@@ -286,11 +348,59 @@ if command -v codex >/dev/null; then
     echo "codex: NOT authenticated — run 'codex login' once (attended) before unattended runs"
     auth_missing=1
   fi
+elif [ -n "${OPENAI_API_KEY:-}" ]; then
+  # OPENAI_API_KEY set but codex absent = the cross-vendor install failed
+  # (setup-cross-vendor.sh warns, does not abort). The repo intends a second
+  # vendor; an unattended run must fail here, not discover it mid-task.
+  echo "codex: NOT installed but OPENAI_API_KEY is set — cross-vendor tooling missing (install failed?)"
+  auth_missing=1
 fi
 
 if [ "$auth_missing" = 1 ] && [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
   echo "REFUSED: AGENT_REQUIRE_AUTH=1 and a vendor login is missing/expired (see above)."
   exit 1
+fi
+
+# Live credential validation (unattended only): presence is not validity —
+# tokens expire and revoke silently, and an unattended run then burns its whole
+# budget on 401s. One cheap curl per PRESENT token, against hosts already in
+# the gateway base allowlist. A definitive vendor rejection (401) is fatal;
+# 403 is NOT one — GitHub answers 403 on valid tokens (endpoint out of scope,
+# secondary rate limits) — and no response is warn-only; gateway health is the
+# egress check's job, not this one's. Deliberately NOT probed: CLAUDE_CODE_OAUTH_TOKEN (not a raw API
+# credential — a 401 here would be a false negative) and OPENAI_API_KEY
+# (api.openai.com is not in the base allowlist).
+if [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ] && ! command -v curl >/dev/null; then
+  # curl gone in an unattended workload = tampering; don't skip validation silently.
+  echo "REFUSED: curl is missing — cannot live-validate credentials for an unattended run (AGENT_REQUIRE_AUTH=1)"
+  exit 1
+fi
+if [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ] && command -v curl >/dev/null; then
+  # ANTHROPIC_BASE_URL rewires the Anthropic credentials to a different
+  # gateway — a vendor 401 would then be a false negative that bricks a valid
+  # boot, and the gateway host is not in the base allowlist. Skip those probes.
+  case "${ANTHROPIC_BASE_URL:-}" in ''|https://api.anthropic.com|https://api.anthropic.com/) anth_direct=1 ;; *) anth_direct=0 ;; esac
+  # GitHub probes /rate_limit, not /user: app installation tokens (ghs_*) — the
+  # natural unattended credential — 403 on /user by design; /rate_limit answers
+  # every valid shape and still 401s a bad one.
+  for spec in "ANTHROPIC_API_KEY|https://api.anthropic.com/v1/models|x-api-key" \
+              "ANTHROPIC_AUTH_TOKEN|https://api.anthropic.com/v1/models|Authorization: Bearer" \
+              "GITHUB_TOKEN|https://api.github.com/rate_limit|Authorization: Bearer"; do
+    v=${spec%%|*}; rest=${spec#*|}; url=${rest%%|*}; hdr=${rest#*|}
+    case "$url" in *api.anthropic.com*) [ "$anth_direct" = 1 ] || continue ;; esac
+    val=$(eval "printf '%s' \"\${$v:-}\"")
+    [ -z "$val" ] && continue
+    if [ "$hdr" = "x-api-key" ]; then hdr="x-api-key: $val"; else hdr="$hdr $val"; fi
+    # anthropic-version is required by the Anthropic API and ignored by GitHub.
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+      -H "$hdr" -H "anthropic-version: 2023-06-01" "$url")
+    case "$code" in
+      401)     echo "REFUSED: $v rejected by ${url#https://} (HTTP 401) — expired or revoked; rotate it before an unattended run"; exit 1 ;;
+      403)     echo "WARN: $v answered 403 on ${url#https://} — not proof of revocation (scope or a secondary rate limit); verify manually if downstream auth fails" ;;
+      2??)     echo "auth: $v accepted by ${url#https://}" ;;
+      *)       echo "WARN: $v not validated (${url#https://} answered HTTP ${code:-000}) — see the egress check above for gateway health" ;;
+    esac
+  done
 fi
 
 # GitHub identity — PR/commit delegation runs as this principal; make it visible.
@@ -331,14 +441,24 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
   # append: token rotation propagates, toolchain lines survive. Username falls
   # back to "token": the registry ignores it, gradle only refuses null.
   if mountpoint -q "$HOME/.gradle" 2>/dev/null; then
-    gp="$HOME/.gradle/gradle.properties"
-    { [ -f "$gp" ] && grep -vE '^(githubUser|gitHubPrivateToken|gpr\.user|gpr\.key)=' "$gp" || true
-      echo "githubUser=${GITHUB_USER:-token}"
-      echo "gitHubPrivateToken=${GITHUB_TOKEN}"
-      echo "gpr.user=${GITHUB_USER:-token}"
-      echo "gpr.key=${GITHUB_TOKEN}"
-    } > "$gp.tmp" && mv "$gp.tmp" "$gp" && chmod 600 "$gp" \
-      && echo "gradle: GitHub Packages credentials written to gradle.properties (volume) — IDE-launched builds resolve private deps"
+    # Same injection refusal as the npm write below: whitespace in the pair
+    # would smuggle extra property lines into gradle.properties. `case`, not
+    # grep, for the same embedded-newline reason.
+    case "${GITHUB_TOKEN}${GITHUB_USER:-}" in *[[:space:]]*) gp_ws=1 ;; *) gp_ws=0 ;; esac
+    if [ "$gp_ws" = 1 ]; then
+      echo "WARN: GITHUB_TOKEN/GITHUB_USER contains whitespace — gradle credentials NOT written (malformed secret; re-run 'sandbox init')"
+    else
+      gp="$HOME/.gradle/gradle.properties"
+      # chmod the temp file BEFORE the rename: the swap must never expose a
+      # world-readable window on the credential.
+      { [ -f "$gp" ] && grep -vE '^(githubUser|gitHubPrivateToken|gpr\.user|gpr\.key)=' "$gp" || true
+        echo "githubUser=${GITHUB_USER:-token}"
+        echo "gitHubPrivateToken=${GITHUB_TOKEN}"
+        echo "gpr.user=${GITHUB_USER:-token}"
+        echo "gpr.key=${GITHUB_TOKEN}"
+      } > "$gp.tmp" && chmod 600 "$gp.tmp" && mv "$gp.tmp" "$gp" \
+        && echo "gradle: GitHub Packages credentials written to gradle.properties (volume) — IDE-launched builds resolve private deps"
+    fi
   fi
 
   # npm: same materialization contract. npm never reads GITHUB_TOKEN from the
@@ -399,7 +519,10 @@ if command -v claude >/dev/null 2>&1; then
   done
   for p in ${PLUGIN_BASELINE:-}; do
     p=$(printf '%s' "$p" | tr -d ' '); [ -z "$p" ] && continue
-    timeout -k 5 15 claude plugin list </dev/null 2>/dev/null | grep -q "${p%%@*}" && continue
+    # Anchored on the id boundary (name then @marketplace or end-quote): an
+    # unanchored substring match let 'foo' shadow 'foo-bar' and skip installs.
+    timeout -k 5 15 claude plugin list --json </dev/null 2>/dev/null \
+      | grep -qE "\"id\": *\"${p%%@*}[@\"]" && continue
     out=$(timeout -k 5 60 claude plugin install "$p" </dev/null 2>&1) \
       && echo "plugins: '$p' installed (volume)" \
       || printf '%s' "$out" | grep -qi 'already' \
@@ -412,8 +535,10 @@ fi
 # A repo opts in by committing a .memspec.yaml pointer. Two boot-time actions,
 # both gated on the pointer + engine, both non-blocking (set -e is off; exit
 # codes swallowed so a memory hiccup never fails boot or CI).
+memspec_wired=0
 if [ -f "$PWD/.memspec.yaml" ]; then
   if command -v memspec >/dev/null 2>&1; then
+    memspec_wired=1
     # SessionStart hook — inject memory at session start so agents never have to
     # remember to search. Written to PROJECT-scope .claude/settings.local.json
     # (per-checkout, gitignored) via the same idempotent settings-reconcile
@@ -458,9 +583,11 @@ if [ -f "$PWD/.memspec.yaml" ]; then
     # run or failed. Single-line note; never blocks.
     echo "note: .memspec.yaml present but 'memspec' CLI not found — memory session injection skipped (expected: pinned install at postCreate)"
   fi
-elif [ -f "$PWD/.claude/settings.local.json" ] && command -v node >/dev/null 2>&1; then
-  # Pointer removed (or never present) but a previous boot may have persisted
-  # the SessionStart hook — reconcile it away. Same idempotent node idiom as
+fi
+if [ "$memspec_wired" = 0 ] && [ -f "$PWD/.claude/settings.local.json" ] && command -v node >/dev/null 2>&1; then
+  # Wiring inactive (pointer removed, never present, or engine absent) but a
+  # previous boot may have persisted the SessionStart hook — a broken hook hits
+  # every session start; reconcile it away. Same idempotent node idiom as
   # the writer: only OUR exact "memspec context" command entry is removed;
   # unparseable JSON is left untouched (nothing of ours can be reliably found
   # in it, and rewriting would clobber unrelated settings).
@@ -489,7 +616,7 @@ elif [ -f "$PWD/.claude/settings.local.json" ] && command -v node >/dev/null 2>&
     if(Object.keys(s.hooks).length===0)delete s.hooks;
     const t=f+".tmp-"+require("crypto").randomBytes(6).toString("hex");
     fs.writeFileSync(t,JSON.stringify(s,null,2)+"\n");fs.renameSync(t,f);
-    console.log("memspec: stale SessionStart hook (memspec context) removed from .claude/settings.local.json (no .memspec.yaml pointer)");
+    console.log("memspec: stale SessionStart hook (memspec context) removed from .claude/settings.local.json (memspec wiring inactive)");
   ' 2>/dev/null || true
 fi
 # ── end memspec wiring ─────────────────────────────────────────────────────
@@ -513,6 +640,17 @@ if [ -f "$PWD/.claude/settings.local.json" ] \
 fi
 
 if [ -z "${ATLASSIAN_AGENT_TOKEN:-}" ]; then
+  # A truly base repo sets NO Atlassian vars. If URL/email are set but the token
+  # is empty, the credential failed to resolve (e.g. an unresolved op:// ref) —
+  # that is NOT the base profile; an enabled MCP would fail mid-task.
+  if [ -n "${ATLASSIAN_URL:-}" ] || [ -n "${ATLASSIAN_AGENT_EMAIL:-}" ]; then
+    if [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
+      echo "REFUSED: ATLASSIAN_URL/EMAIL are set but ATLASSIAN_AGENT_TOKEN is empty — the Atlassian credential did not resolve; fix before an unattended run."
+      exit 1
+    fi
+    echo "WARN: Atlassian URL/email set but token is empty — MCP calls will fail; not treating this as the base profile."
+    exit 0
+  fi
   echo "profile: base (no MCP data sources wired) — agent reaches code + allowlisted registries only"
   exit 0
 fi
@@ -520,14 +658,49 @@ fi
 : "${ATLASSIAN_URL:?with-atlassian variant needs ATLASSIAN_URL (e.g. https://yourorg.atlassian.net)}"
 : "${ATLASSIAN_AGENT_EMAIL:?with-atlassian variant needs ATLASSIAN_AGENT_EMAIL (the service account)}"
 
-# Who does this token actually authenticate as?
-me=$(curl -s --max-time 10 -u "${ATLASSIAN_AGENT_EMAIL}:${ATLASSIAN_AGENT_TOKEN}" \
+# Who does this token actually authenticate as? Capture the HTTP status so a
+# rejected credential is distinguishable from a gateway flake — validate the
+# CREDENTIAL, the identity below is informational.
+me=$(curl -s --max-time 10 -w '\n%{http_code}' -u "${ATLASSIAN_AGENT_EMAIL}:${ATLASSIAN_AGENT_TOKEN}" \
   "${ATLASSIAN_URL}/rest/api/2/myself" 2>/dev/null)
+me_code=${me##*$'\n'}
+me=${me%$'\n'*}
 name=$(printf '%s' "$me" | grep -o '"displayName":"[^"]*"' | head -1 | cut -d'"' -f4)
 email=$(printf '%s' "$me" | grep -o '"emailAddress":"[^"]*"' | head -1 | cut -d'"' -f4)
 
+case "$me_code" in
+  401|403)
+    if [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
+      echo "REFUSED: Atlassian token rejected (HTTP $me_code) — expired or revoked; rotate it before an unattended run."
+      exit 1
+    fi
+    echo "WARN: Atlassian token rejected (HTTP $me_code) — expired or revoked; MCP calls will fail the same way."
+    exit 0 ;;
+esac
+
+# Only a 2xx makes the response body trustworthy. A non-2xx (5xx, 000, redirect,
+# 404) can still carry a stale/cached user-shaped body with "displayName" — do
+# NOT let that parse as a valid identity. Indeterminate = fail closed unattended.
+case "$me_code" in
+  2??) : ;;
+  *)
+    if [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
+      echo "REFUSED: Atlassian check returned HTTP ${me_code:-000} — credential validity indeterminate; fix before an unattended run."
+      exit 1
+    fi
+    echo "WARN: Atlassian check returned HTTP ${me_code:-000} — credential validity not established; MCP may fail."
+    exit 0 ;;
+esac
+
 if [ -z "$name" ]; then
-  echo "WARN: could not verify the Atlassian identity (network or credentials)."
+  # Indeterminate: timeout, wrong URL (404), 5xx, or an unparseable 2xx body —
+  # credential validity was NOT established. Under the unattended contract that
+  # is a boot failure (fail here, not mid-task); attended it stays a warning.
+  if [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
+    echo "REFUSED: could not establish Atlassian credential validity (HTTP ${me_code:-000} — network, timeout, wrong URL, or unparseable response); an unattended run must not open with unverified MCP auth."
+    exit 1
+  fi
+  echo "WARN: could not verify the Atlassian identity (network or response shape)."
   echo "      MCP calls will fail the same way — fix before an unattended run."
   exit 0
 fi
@@ -539,11 +712,8 @@ PATTERN="${AGENT_IDENTITY_PATTERN:-^(svc|bot|agent)[-._]|\\+agent@}"
 if printf '%s\n' "$email" | grep -Eqi "$PATTERN"; then
   echo "identity check: service account — ok"
 else
-  echo ""
-  echo "REFUSED: '${email}' does not look like a scoped service account."
-  echo "A personal token in an unattended container reads everything YOU can read."
-  echo "Provision a read-only, space-allowlisted service identity instead."
-  echo "(override for a supervised experiment: AGENT_ALLOW_PERSONAL=1)"
-  [ "${AGENT_ALLOW_PERSONAL:-0}" = "1" ] || exit 1
-  echo "override active: AGENT_ALLOW_PERSONAL=1 — do NOT leave this on for unattended runs"
+  # Personal identities are acceptable (owner policy) — warn, don't gate.
+  echo "WARN: '${email}' does not look like a scoped service account."
+  echo "      A personal token in an unattended container reads everything YOU can read —"
+  echo "      recommend a read-only, space-allowlisted service identity for unattended fleets."
 fi

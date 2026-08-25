@@ -74,6 +74,12 @@ services:
       # delete the HOST's tree through the bind mount before failing auth.
       # Each side installs its own; the volume persists across rebuilds.
       - node-modules:/workspaces/${SANDBOX_REPO:-app}/node_modules
+      # .devcontainer overlaid read-only (more-specific nested mount wins, same
+      # mechanism as node_modules above): initializeCommand runs these files ON
+      # THE HOST at every up, so an agent write here is host code execution at
+      # the next relaunch. write-env.cjs is unaffected — it runs host-side,
+      # before the container exists.
+      - ../.devcontainer:/workspaces/${SANDBOX_REPO:-app}/.devcontainer:ro
       - bash-history:/commandhistory
       - npm-config:/home/node/.npm-config
     depends_on:
