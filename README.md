@@ -71,18 +71,21 @@ inside it by design, and the agent can use an allowlisted destination as itself 
 a repo its token can reach). Egress containment is the network boundary, not a
 substitute for keeping those tokens scoped.
 
-**Do git on the host through `sandbox git`, not raw `git`.** The repo is bind-mounted
-into the workload writable — including `.git` — because the agent has to commit its own
-work. That means the agent can write `.git/hooks/*` (or repoint `core.hooksPath`), and a
-git hook runs as *you* on the *host* the next time you `git commit`/`checkout` in that
-checkout. Two things follow. Run host-side git via `sandbox git <args>` — it forces
-`core.hooksPath` to an empty dir on the command line (which beats anything the agent
-wrote into `.git/config`), so host hooks never fire. And do routine git inside the
-container where you already work: commit-time gates like husky/pre-commit run there
-normally and stay contained. `sandbox` prints a NOTE at launch if it finds installed
-hooks in `.git/hooks`. This is the one host-execution path the read-only `.devcontainer`
-mount does not cover; treat the host checkout as agent-writable and let the container do
-the committing.
+**Do git inside the container, not on the host.** The repo is bind-mounted into the
+workload writable, `.git` included, because the agent has to commit its own work. That
+also means the agent controls `.git/config`, and git turns config into code execution in
+more places than hooks: `core.fsmonitor` runs on a plain `git status`, and
+`core.sshCommand`, `core.pager`, `credential.helper`, `diff.external`, and `!`-aliases
+are all command hooks too. So **any** host-side git in a sandbox repo can run agent-chosen
+code as you, and there is no reliable way to neutralize that from the host side (git
+always reads the repo's local config; you can't patch every exec key). A planted hook or
+config value is untracked, so it never shows up in a PR, and it can fire before a PR even
+exists. The safe path is to keep git *inside the container*: open the repo through **VS
+Code Dev Containers** or **JetBrains Remote Development** so the IDE's terminal and git
+run in the box (husky/pre-commit stay contained there), or use the container's own
+terminal. Treat the host checkout as agent-writable and don't run host-side git in it.
+`sandbox` prints a NOTE at launch if it finds installed hooks in `.git/hooks`. This is the
+one host-execution path the read-only `.devcontainer` mount does not cover.
 
 ## What you get
 
