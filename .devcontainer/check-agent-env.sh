@@ -289,7 +289,9 @@ fi
 # could PATH-shadow to point the probe at a non-writable dir and fake a pass):
 # `${var%/*}` strips the filename, `cd`/`pwd` are bash builtins.
 _src="${BASH_SOURCE:-$0}"; _dir="${_src%/*}"; [ "$_dir" = "$_src" ] && _dir="."
-selfdir=$(cd "$_dir" && pwd)
+# CDPATH= so a stray CDPATH in the env can't make `cd` echo a resolved path into
+# the command substitution and corrupt selfdir.
+selfdir=$(CDPATH= cd "$_dir" && pwd)
 # Probe writability with SHELL BUILTINS only — no external binary a root agent
 # could remove to force a false "read-only" pass (mktemp/touch are removable;
 # `set -C` + redirection and $RANDOM are builtins that can't be). $RANDOM×2+$$
