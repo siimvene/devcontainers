@@ -269,6 +269,13 @@ if command -v curl >/dev/null; then
   else
     echo "egress: no direct route (proxy is the only path out)"
   fi
+elif [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
+  # The image ships curl; its absence in an unattended workload means the layer
+  # was tampered with. Refuse rather than skip the containment probes silently.
+  echo "REFUSED: curl is missing — cannot verify egress containment for an unattended run (AGENT_REQUIRE_AUTH=1)"
+  exit 1
+else
+  echo "WARN: curl missing — egress containment not verified"
 fi
 
 # Sandbox-immutability tripwire: a container created before the template gained
@@ -279,8 +286,11 @@ fi
 # actual behavior (can THIS user write?) and refuse, same class as proven-open
 # egress above.
 selfdir=$(cd "$(dirname "${BASH_SOURCE:-$0}")" && pwd)
-if touch "$selfdir/.rw-probe" 2>/dev/null; then
-  rm -f "$selfdir/.rw-probe"
+# Unique name + noclobber (set -C): a pre-planted unwritable/symlink .rw-probe
+# must not make a genuine write succeed-then-fail into a false "read-only" pass.
+rwprobe="$selfdir/.rw-probe.$$"
+if ( set -C; : > "$rwprobe" ) 2>/dev/null; then
+  rm -f "$rwprobe"
   echo "REFUSED: .devcontainer is WRITABLE from the workload — an agent write here is host code execution at the next relaunch; recreate the container ('sandbox rebuild' on the host) to pick up the read-only mount"
   exit 1
 fi
@@ -345,6 +355,11 @@ fi
 # egress check's job, not this one's. Deliberately NOT probed: CLAUDE_CODE_OAUTH_TOKEN (not a raw API
 # credential — a 401 here would be a false negative) and OPENAI_API_KEY
 # (api.openai.com is not in the base allowlist).
+if [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ] && ! command -v curl >/dev/null; then
+  # curl gone in an unattended workload = tampering; don't skip validation silently.
+  echo "REFUSED: curl is missing — cannot live-validate credentials for an unattended run (AGENT_REQUIRE_AUTH=1)"
+  exit 1
+fi
 if [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ] && command -v curl >/dev/null; then
   # ANTHROPIC_BASE_URL rewires the Anthropic credentials to a different
   # gateway — a vendor 401 would then be a false negative that bricks a valid
@@ -638,8 +653,13 @@ case "$me_code" in
 esac
 
 if [ -z "$name" ]; then
-  # Network failure, timeout, or a 2xx body that did not parse — never fatal:
-  # a gateway flake must not brick boot (the egress check covers gateway health).
+  # Indeterminate: timeout, wrong URL (404), 5xx, or an unparseable 2xx body —
+  # credential validity was NOT established. Under the unattended contract that
+  # is a boot failure (fail here, not mid-task); attended it stays a warning.
+  if [ "${AGENT_REQUIRE_AUTH:-0}" = "1" ]; then
+    echo "REFUSED: could not establish Atlassian credential validity (HTTP ${me_code:-000} — network, timeout, wrong URL, or unparseable response); an unattended run must not open with unverified MCP auth."
+    exit 1
+  fi
   echo "WARN: could not verify the Atlassian identity (network or response shape)."
   echo "      MCP calls will fail the same way — fix before an unattended run."
   exit 0
