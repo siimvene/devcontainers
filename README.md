@@ -71,6 +71,19 @@ inside it by design, and the agent can use an allowlisted destination as itself 
 a repo its token can reach). Egress containment is the network boundary, not a
 substitute for keeping those tokens scoped.
 
+**Do git on the host through `sandbox git`, not raw `git`.** The repo is bind-mounted
+into the workload writable — including `.git` — because the agent has to commit its own
+work. That means the agent can write `.git/hooks/*` (or repoint `core.hooksPath`), and a
+git hook runs as *you* on the *host* the next time you `git commit`/`checkout` in that
+checkout. Two things follow. Run host-side git via `sandbox git <args>` — it forces
+`core.hooksPath` to an empty dir on the command line (which beats anything the agent
+wrote into `.git/config`), so host hooks never fire. And do routine git inside the
+container where you already work: commit-time gates like husky/pre-commit run there
+normally and stay contained. `sandbox` prints a NOTE at launch if it finds installed
+hooks in `.git/hooks`. This is the one host-execution path the read-only `.devcontainer`
+mount does not cover; treat the host checkout as agent-writable and let the container do
+the committing.
+
 ## What you get
 
 | Piece                                      | Job                                                                                                                      |

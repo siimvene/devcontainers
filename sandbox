@@ -17,6 +17,19 @@ set -euo pipefail
 
 AGENT_ENV="${AGENT_ENV:-$HOME/.agent/agent.env}"
 
+# ─────────────────────────────── sandbox git ─────────────────────────────────
+# Run host-side git with hooks DISABLED. The repo — including .git — is bind-
+# mounted writable into the container, so the untrusted agent can plant
+# .git/hooks that would execute on the HOST at your next commit/checkout.
+# Command-line `-c` overrides local .git/config, so this stays safe even if the
+# agent re-pointed core.hooksPath. Commit-time gates (husky/pre-commit) still
+# run INSIDE the container, where the agent commits and the hooks are contained.
+if [ "${1:-}" = "git" ]; then
+  shift
+  nohooks="$HOME/.agent/no-hooks"; mkdir -p "$nohooks"
+  exec git -c core.hooksPath="$nohooks" "$@"
+fi
+
 # ─────────────────────────────── sandbox init ────────────────────────────────
 # Guided machine onboarding: prereqs → 1Password item → tokens (captured
 # straight into the vault, never onto disk) → agent.env with op:// refs →
@@ -428,6 +441,17 @@ repo_name=$(basename "$(cd "$dir" && pwd)")
 project_name=$(printf '%s' "$repo_name" | tr '[:upper:]' '[:lower:]')
 workload_filter=${project_name}_devcontainer-workload
 mounts_of() { docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$1" 2>/dev/null; }
+
+# Host-side git-hook tripwire: the agent can write .git/hooks through the bind
+# mount, and those run on the HOST if you `git` in this checkout directly. Warn
+# (don't block — harmless until host-side git runs; 'sandbox git ...' disables
+# them). Container-side husky/pre-commit are a different path and stay contained.
+active_hooks=$(ls "$dir/.git/hooks" 2>/dev/null | grep -v '\.sample$' || true)
+if [ -n "$active_hooks" ]; then
+  echo "sandbox: NOTE — installed git hooks in this repo's .git/hooks run on the HOST if you git here:" >&2
+  printf '    %s\n' "$(echo $active_hooks | tr '\n' ' ')" >&2
+  echo "    the sandboxed agent can write these — use 'sandbox git ...' on the host to disable hook execution." >&2
+fi
 
 # Belt-and-suspenders for the per-repo mount: compose resolves ${SANDBOX_REPO}
 # from the process env FIRST, .devcontainer/.env second. The .env file (written
